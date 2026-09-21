@@ -1,0 +1,14 @@
+# Word 交付文档与临时锁文件
+*.doc
+*.docx
+~$*
+
+# C++ 编译产物
+*.o
+*.obj
+*.exe
+*.out
+hello_world/hello
+
+# CMake 构建目录
+build/
