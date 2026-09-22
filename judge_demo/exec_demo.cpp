@@ -19,7 +19,7 @@ int main()
         int status;
         waitpid(pid, &status, 0); 
 
-        if (WIFEXITED(status) && WIFEXITED(status) == 0)
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
         {
             cout << "compile ok\n";
         }
