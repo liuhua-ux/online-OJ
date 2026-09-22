@@ -10,5 +10,14 @@
 *.out
 hello_world/hello
 
+# 判题器实验产物（Linux 下不带后缀的可执行文件）
+judge_demo/compare
+judge_demo/fork_demo
+judge_demo/exec_demo
+judge_demo/test
+
+# Visual Studio 本地缓存
+.vs/
+
 # CMake 构建目录
 build/
