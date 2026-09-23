@@ -4,6 +4,7 @@
 #include <sys/wait.h>  
 #include <string>
 #include <fcntl.h>
+#include <csignal>
 using namespace std;
 
 int main()
@@ -64,12 +65,30 @@ int main()
                 close(in);
                 close(out);
 
+                alarm(2);
+
                 execlp("./test","./test",(char*)NULL);
                 cerr<<"run exec failed\n";
                 return 1;
             }
-            waitpid(run_pid, &status,0);
+            int run_status;
+            waitpid(run_pid, &run_status,0);
             cout<<"run done\n";
+
+            if(WIFSIGNALED(run_status))
+            {
+                int sig = WTERMSIG(run_status);
+                if(sig==SIGALRM)
+                {
+                    cout << "Time Limit Exceeded\n";
+                }
+                else
+                {
+                    cout << "Runtime Error (signal " << sig << ")\n";
+                }
+            return 1;
+            }
+
             ifstream got("output.txt");
             ifstream want("expected.txt");
             string a,b,line;
