@@ -7,15 +7,24 @@
 
 ## 技术栈
 - **语言**：C++（C++17）
-- **环境**：Windows 11 + WSL2（Ubuntu 24.04），g++ 13.3.0
-- **构建**：CMake 3.28.3 / Make 4.3
-- **服务端**：epoll + HTTP、线程池、异步判题队列
-- **存储**：MySQL、Redis（排行榜）
+- **开发环境**：腾讯云 VPS（Ubuntu 24.04）+ VS Code Remote-SSH，g++ 13.3.0
+- **构建**：g++ 直接编译（CMake 3.28.3 / Make 4.3 备用）
+- **服务端**（规划中）：epoll + HTTP、线程池、异步判题队列
+- **存储**（规划中）：MySQL、Redis（排行榜）
 
 ## 目录结构
 ```
 hello_world/   实验1：Hello World 程序（工具链验证）
+judge_demo/    判题核心：编译、运行、判定
+  judge.cpp      判题主程序
+  NOTES.md       设计与进展笔记
 ```
 
 ## 实验进度
 - 实验1（课程基础与实验环境搭建）：✅ 工具链验证 + Hello World + 首次提交
+- 实验2（需求分析）：✅ 需求分析文档
+- 实验2 之后（判题核心实现）：✅ fork/exec 编译用户代码 · pipe+dup2 捕获编译报错 · 重定向运行用户程序 · 判定 CE / AC / WA / TLE / RE · 命令行参数化
+- 进行中：多测试点 → 内存限制 → 模块化 → Web + 数据库
+
+## 参考
+- `judge_demo/NOTES.md`：判题核心的结构图与关键设计决策（含实测结论）
