@@ -1,8 +1,10 @@
-#include <iostream>
+ #include <iostream>
 using namespace std;
 
-int main()
-{
-    cout << "I was compiled by your judge!\n";
+  int main()
+  {
+    int a = 0, b = 0;
+    cin >> a >> b;
+    cout << a + b << "\n";
     return 0;
-}
+  }

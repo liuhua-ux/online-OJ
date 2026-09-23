@@ -1,7 +1,9 @@
 #include <iostream>
+#include <fstream>
 #include <unistd.h>      
 #include <sys/wait.h>  
 #include <string>
+#include <fcntl.h>
 using namespace std;
 
 int main()
@@ -46,6 +48,47 @@ int main()
         if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
         {
             cout << "compile ok\n";
+            pid_t run_pid = fork();
+            if(run_pid==0)
+            {
+                int in = open("input.txt",O_RDONLY);
+                int out = open("output.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
+                
+                if(in == -1||out == -1)
+                {
+                    cerr<<"open failed";
+                    return 1;
+                }
+                dup2(in,0);
+                dup2(out,1);
+                close(in);
+                close(out);
+
+                execlp("./test","./test",(char*)NULL);
+                cerr<<"run exec failed\n";
+                return 1;
+            }
+            waitpid(run_pid, &status,0);
+            cout<<"run done\n";
+            ifstream got("output.txt");
+            ifstream want("expected.txt");
+            string a,b,line;
+            while(getline(got,line))
+            {
+                a += line+"\n";
+            }
+            while(getline(want,line))
+            {
+                b += line+"\n";
+            }
+            if(a==b)
+            {
+                cout<<"AC\n";
+            }
+            else
+            {
+                cout<<"WA\n";
+            }
         }
         else
         {
