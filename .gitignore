@@ -15,7 +15,7 @@ judge_demo/compare
 judge_demo/fork_demo
 judge_demo/exec_demo
 judge_demo/test
-
+judge_demo/pipe_demo
 # Visual Studio 本地缓存
 .vs/
 
