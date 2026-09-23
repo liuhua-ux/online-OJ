@@ -7,8 +7,14 @@
 #include <csignal>
 using namespace std;
 
-int main()
+int main(int argc,char* argv[])
 {
+    if(argc<4)
+    {
+        cerr << "Usage: ./judge <source_file> <input_file> <expected_output>\n";
+		return 1;
+    }
+
     int fd[2];
     if(pipe(fd)==-1)
     {
@@ -24,7 +30,7 @@ int main()
         dup2(fd[1],2);
         close(fd[1]);
 
-        execlp("g++", "g++", "-o", "test", "test.cpp", (char*)NULL);
+        execlp("g++", "g++", "-o", "test", argv[1], (char*)NULL);
 
         cerr << "exec failed\n";
         return 1;
@@ -52,7 +58,7 @@ int main()
             pid_t run_pid = fork();
             if(run_pid==0)
             {
-                int in = open("input.txt",O_RDONLY);
+                int in = open(argv[2],O_RDONLY);
                 int out = open("output.txt",O_WRONLY|O_CREAT|O_TRUNC,0644);
                 
                 if(in == -1||out == -1)
@@ -90,7 +96,7 @@ int main()
             }
 
             ifstream got("output.txt");
-            ifstream want("expected.txt");
+            ifstream want(argv[3]);
             string a,b,line;
             while(getline(got,line))
             {
