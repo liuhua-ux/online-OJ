@@ -17,8 +17,10 @@ judge_demo/exec_demo
 judge_demo/test
 judge_demo/pipe_demo
 judge_demo/judge
+judge_demo/output.txt
 # Visual Studio 本地缓存
 .vs/
 
 # CMake 构建目录
 build/
+
