@@ -5,6 +5,7 @@
 #include <string>
 #include <fcntl.h>
 #include <csignal>
+#include <sys/resource.h>
 using namespace std;
 
 int main(int argc, char *argv[])
@@ -83,6 +84,11 @@ int main(int argc, char *argv[])
                     close(in);
                     close(out);
 
+                    struct rlimit lim;
+                    lim.rlim_cur = 1024LL * 1024 * 1024;
+                    lim.rlim_max = 1024LL * 1024 * 1024;
+                    setrlimit(RLIMIT_AS, &lim);
+
                     alarm(2);
 
                     execlp("./test", "./test", (char *)NULL);
@@ -90,8 +96,17 @@ int main(int argc, char *argv[])
                     return 1;
                 }
                 int run_status;
-                waitpid(run_pid, &run_status, 0);
+                struct rusage ru;
+                wait4(run_pid, &run_status, 0, &ru);
+            
                 cout << "run done\n";
+                cout << "peak memory: " << ru.ru_maxrss << " KB\n";
+
+                if(ru.ru_maxrss > 256LL * 1024)
+                {
+                cout << "Memory Limit Exceeded (" << ru.ru_maxrss << " KB)\n";
+                return 1;
+                }
 
                 if (WIFSIGNALED(run_status))
                 {
