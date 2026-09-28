@@ -40,10 +40,13 @@ all 3 test passed
 ## 整体结构
 
 ```
-编译一次 ──→ 运行 N 次（N 由数据文件决定）──→ 逐组比对
-fork + exec g++        fork + exec ./test
-pipe + dup2(→2)        open + dup2(→0, 1)
-读报错判 CE            setrlimit 保命 → alarm 限时 → 判 TLE / MLE / RE / AC / WA
+main
+ ├── compile(源文件)                  编译一次
+ └── run_one_test(输入, 答案) × N     逐组跑（N 由数据文件决定）
+
+compile 内部：      fork + exec g++ / pipe + dup2(→2) / read 报错判 CE
+run_one_test 内部：fork + exec ./test / open + dup2(→0, 1)
+                   setrlimit 保命 → alarm 限时 → 判 TLE / MLE / RE / AC / WA
 ```
 
 ## 关键设计决策
@@ -170,40 +173,114 @@ wait4(run_pid, &run_status, 0, &ru);   // 第 4 个参数：账本写到哪
   - **信号像火警铃**：它只说"出事了"，说不出"烧到多少度"。要判 MLE 必须靠**测量**
 - **靠 `ru_maxrss` 测量**：拿到的是一个**数字**（用了多少 KB），才能和限制比大小
 
-### 10. 拆函数：编译独立成 `compile()`
+### 10. 拆函数（模块化）
 
-**第一步只拆出一个函数**（`main` 原来 164 行、嵌套 6 层）：
+**拆出两个函数，`main` 从 164 行降到 35 行**，读起来像一份目录：
 
 ```cpp
-bool compile(string src);   // true = 编译成功，false = 编译失败
+int main(...)
+{
+    if (!compile(argv[1])) return 1;      // 编译一次
+
+    for (int i = 1;; i++)                  // 逐组跑
+    {
+        // 探路 → cout << "Test i"
+        if (run_one_test(in_path, ans_path)) passed++;
+        else return 1;
+    }
+    if (passed == 0) { ... }               // 空数据保护
+    cout << "all " << passed << " test passed\n";
+}
 ```
 
-- 成功时函数内打印 `compile ok`，失败时函数内打印 g++ 报错 —— **谁做的事谁负责报告**
-- 调用处只剩一行：`if (!compile(argv[1])) return 1;`
-- **返回值不再是退出码**：`return` 在函数里的含义是"回到调用我的地方"，
-  原来的 `return 1` 要改成 `return true` / `return false`
-
-**fork 出的子进程里只能 `_exit()`，不能 `return`**
-
-- 子进程 `return` 只是从函数返回，会回到 `main` **继续往下跑判题循环**
-- 后果：本该结束的编译子进程活着，与父进程**同时判题**、抢同一个 `output.txt`
-- `_exit(1)` 才是"立刻结束这个进程，别回去"
-- 这条路径平时走不到（`execlp("g++")` 成功时进程映像直接被替换），是**潜伏的雷**
-
-**重构后的回归验证**（六条路径全过，行为与拆之前逐字节一致）：
-
-| 源文件 | 判定 | 关键输出 |
+| 函数 | 签名 | 职责 |
 | --- | --- | --- |
-| `bad.cpp`（少分号，临时文件） | CE | `Compile Error (exit code 1)`，g++ 报错原样抓回（`catch 146 bytes`） |
-| `tle.cpp` | TLE | `Time Limit Exceeded`，1024 KB |
-| `re.cpp` | RE | `Runtime Error (signal 11)`，1024 KB |
-| `bigmem.cpp` | MLE | `822784 KB` —— 与重构前**完全相同** |
+| `compile` | `bool compile(string src)` | 编译 + 抓取 g++ 报错 |
+| `run_one_test` | `bool run_one_test(string in_path, string ans_path)` | 跑一组数据 + 判定 + 比对 |
 
-**diff 里的缩进噪音**
+#### 10.1 返回值都取 `bool`，不用 `int`
+
+**问：`main` 拿到结果后需要知道什么？**
+
+- `compile`：只要知道"成没成"
+- `run_one_test`：一组测试有五种结局（AC/WA/TLE/RE/MLE），但 `main` 只需要知道
+  **"过没过"** —— 具体是哪种，函数内部已经打印了（跟 `compile` 自己打印 `Compile Error` 一样）
+- 所以 `true` = 通过，`false` = 不通过。**谁做的事谁负责报告**
+
+**为什么不用 `int` 返回码？**
+
+- 得先发明一张对照表（`0 = AC？1 = WA？2 = TLE？`），之后每读一行代码都要查表
+- 更别扭的是那个 `0`：按退出码的直觉 `0` 表示成功，在这里却要表示 AC —— **同一套约定打架**
+- 这与"`return 1` 在 `main` 里是进程失败、搬进函数后含义就变了"是同一个形状
+
+#### 10.2 子进程只能 `_exit()`，父进程只能 `return`（这条坑踩了两次）
+
+- 子进程 `return` 只是**从函数返回**，会回到 `main` 继续跑判题循环 →
+  本该结束的子进程活着，与父进程**同时判题**、抢同一个 `output.txt`
+- 反过来：父进程**绝不能** `_exit()` —— 那是在判题器自己身上动手，程序当场暴毙
+- **判据不是"写的是不是 `return 1`"，而是"这一行跑在哪个进程里"** ——
+  看它在不在 `if (pid == 0) { ... }` 的大括号内
+- `run_one_test` 里的分布：子进程 **2 处** `_exit(1)`（`open failed` / `run exec failed`），
+  父进程 **3 处** `return false`（MLE / 信号 / WA），外加 AC 的 `return true`
+- 这些路径平时走不到（`execlp` 成功时进程映像直接被替换），是**潜伏的雷**
+
+#### 10.3 大括号错位：一个"死人"的复活
+
+- 搬代码时少了 `for` 的结束大括号，`if (passed == 0)` 和 `cout << "all " ...` 被吞进循环
+- **现象**：`all 1 test passed` / `all 2 test passed` 每跑完一组就打印一次（本该最后只打一次）
+- **后果**：循环里的 `if (passed == 0)` 永不成立 —— 能执行到那儿的都是刚 AC 的，`passed >= 1`
+  → **空数据保护失效**，第 7 节那个"假通过"第 3 条**复活**
+- **编译器不报错**，只能从输出看出来 → 又一次"安静地说谎"
+- 教训：大括号对不上时，代码会被归到错误的层级，**编译器不会替你发现**
+
+#### 10.4 回归验证：六条判定全部实测
+
+| 用例 | 判定 | 关键输出 | 退出码 |
+| --- | --- | --- | --- |
+| `test.cpp` | AC | `all 3 test passed`（只出现一次） | 0 |
+| `bad.cpp`（少分号，临时文件） | CE | `Compile Error (exit code 1)`，g++ 报错原样抓回 | 1 |
+| 把 `2.ans` 改成 999 | WA | `WA`，且**立刻停住**不再跑 Test 3 | 1 |
+| `tle.cpp` | TLE | `Time Limit Exceeded`，1024 KB | 1 |
+| `re.cpp` | RE | `Runtime Error (signal 11)`，1024 KB | 1 |
+| `bigmem.cpp` | MLE | `822912 KB` | 1 |
+| 空目录 | —— | `no test data found` | 1 |
+
+#### 10.5 `ru_maxrss` 是测量值，不是常数
+
+- 同一个 `bigmem.cpp`，三次实测：`822784` / `822784` / `822912` KB
+- 它受环境变量、动态库布局等影响，**每次跑都会浮动**
+- 阈值 256MB 离 800MB 很远，判定不受影响；但**卡在限制边缘的程序可能一次判 MLE、一次判 AC**
+
+#### 10.6 diff 里的缩进噪音
 
 - 拆掉 `main` 外层 `else` 后，函数体整体左移 4 空格 → `git diff --stat` 显示 126 增 / 118 删
 - `git diff -w --stat`（`-w` = ignore whitespace）→ **31 增 / 23 删**，这才是真正的逻辑改动
 - 行数只反映**阅读量**，不反映危险性：漏掉 `compile()` 那次是纯删除、一行新代码都没加，却致命
+
+### 11. 同一个陷阱的三种面貌：你跑的不是你以为的程序
+
+一天里撞了三次，全是同一件事：
+
+| 你以为在跑 | 实际在跑 | 怎么暴露的 |
+| --- | --- | --- |
+| 新编译出来的用户程序 | 上一轮**残留的 `test` 二进制** | `rm -f test` 后再跑，才报 `run exec failed` |
+| 真实的判题结果 | 用残留 `test` 跑出的**假 AC** | 同上 |
+| 刚改好的判题器 | **改之前编译的旧 `judge`** | `all 1/2 test passed` 出现的位置不对 |
+
+**共性**：源码、二进制、你实际运行的那份，三者脱节了。
+
+**对策**
+
+- 改完源码，**第一件事是重新编译**
+- 结果"不对劲"时，**先确认跑的是不是新程序**，再怀疑逻辑
+- 当行为测试分不出新旧时（重构后的程序本来就该跑出一样的结果），查**身外之物**：
+  - `ls -l --time-style=+%H:%M:%S judge judge.cpp` —— 时间戳谁更新
+  - `nm judge | grep run_one_test` —— 二进制里到底有没有这个符号
+  - `grep -n "run_one_test" judge.cpp` —— 源码里有没有
+- **临时文件用完就清**：`bad.cpp`、残留的 `test`、`output.txt` —— 它们都会替 bug 打掩护
+
+**仓库也一样**：本地仓库、服务器仓库、GitHub 三者同样会脱节。`push` 被拒就是这个信号 ——
+先 `git pull --rebase` 再 push。`rebase` 会重写提交，hash 变化是正常的。
 
 ## 已知问题 / 待改进
 
@@ -212,11 +289,10 @@ bool compile(string src);   // true = 编译成功，false = 编译失败
   不能代表真实需求。现有测试用例均未触及此边界。
 - **内存不能中途拦截**：现在是"等程序跑完（或被砍）再算账"。更严格的 OJ 会在运行中**轮询**
   `/proc/<pid>/status`，一超限立刻杀掉，避免 2 秒内真的吃掉大量内存。本项目未实现。
+- **`ru_maxrss` 有测量浮动**：同一程序多次运行可差几十~几百 KB（实测 `822784` / `822912`）。
+  卡在限制边缘的程序可能出现"一次 MLE、一次 AC"的抖动。严格 OJ 会给容差，或改用更稳定的测量方式。
 - 并发判题时 `setrlimit` 的宽限额（1GB）仍可能被多个进程同时占满，真正的隔离需要 cgroup。
 
 ## 下一步
 
-1. 继续拆函数：抽出 `run_one_test()`
-   - 把"跑一组数据 → 判定 → 比对"整块装进一个函数，`main` 里只剩调用
-   - 难点：AC/WA/TLE/RE/MLE 都是**一种结果**，要想办法从函数里带出来（返回值怎么设计）
-2. Web + 数据库
+1. Web + 数据库 —— 把判题器包成服务：前端提交代码，后台读退出码与屏幕输出
