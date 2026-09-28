@@ -63,6 +63,87 @@ bool compile(string src)
     return false;
 }
 
+// 跑一组数据并判定
+// true = AC，false = 不通过（具体原因函数内已打印）
+bool run_one_test(string in_path, string ans_path)
+{
+    pid_t run_pid = fork();
+    if (run_pid == 0)
+    {
+        int in = open(in_path.c_str(), O_RDONLY);
+        int out = open("output.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+        if (in == -1 || out == -1)
+        {
+            cerr << "open failed";
+            _exit(1); // 子进程 ①
+        }
+        dup2(in, 0);
+        dup2(out, 1);
+        close(in);
+        close(out);
+
+        struct rlimit lim;
+        lim.rlim_cur = 1024LL * 1024 * 1024;
+        lim.rlim_max = 1024LL * 1024 * 1024;
+        setrlimit(RLIMIT_AS, &lim);
+
+        alarm(2);
+
+        execlp("./test", "./test", (char *)NULL);
+        cerr << "run exec failed\n";
+        _exit(1); // 子进程 ②
+    }
+
+    int run_status;
+    struct rusage ru;
+    wait4(run_pid, &run_status, 0, &ru);
+
+    cout << "run done\n";
+    cout << "peak memory: " << ru.ru_maxrss << " KB\n";
+
+    if (ru.ru_maxrss > 256LL * 1024)
+    {
+        cout << "Memory Limit Exceeded (" << ru.ru_maxrss << " KB)\n";
+        return false; // 父进程 ①
+    }
+    if (WIFSIGNALED(run_status))
+    {
+        int sig = WTERMSIG(run_status);
+        if (sig == SIGALRM)
+        {
+            cout << "Time Limit Exceeded\n";
+        }
+        else
+        {
+            cout << "Runtime Error (signal " << sig << ")\n";
+        }
+        return false; // 父进程 ②
+    }
+
+    ifstream got("output.txt");
+    ifstream want(ans_path);
+    string a, b, line;
+    while (getline(got, line))
+    {
+        a += line + "\n";
+    }
+    while (getline(want, line))
+    {
+        b += line + "\n";
+    }
+    if (a == b)
+    {
+        cout << "AC\n";
+        return true; // AC
+    }
+    else
+    {
+        cout << "WA\n";
+        return false; // 父进程 ③
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 3)
@@ -71,7 +152,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if(!compile(argv[1]))
+    if (!compile(argv[1]))
     {
         return 1;
     }
@@ -87,82 +168,16 @@ int main(int argc, char *argv[])
         }
         cout << "Test " << i << "\n";
 
-        pid_t run_pid = fork();
-        if (run_pid == 0)
+        if (run_one_test(in_path, ans_path))
         {
-            int in = open(in_path.c_str(), O_RDONLY);
-            int out = open("output.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-
-            if (in == -1 || out == -1)
-            {
-                cerr << "open failed";
-                return 1;
-            }
-            dup2(in, 0);
-            dup2(out, 1);
-            close(in);
-            close(out);
-
-            struct rlimit lim;
-            lim.rlim_cur = 1024LL * 1024 * 1024;
-            lim.rlim_max = 1024LL * 1024 * 1024;
-            setrlimit(RLIMIT_AS, &lim);
-
-            alarm(2);
-
-            execlp("./test", "./test", (char *)NULL);
-            cerr << "run exec failed\n";
-            return 1;
-        }
-        int run_status;
-        struct rusage ru;
-        wait4(run_pid, &run_status, 0, &ru);
-
-        cout << "run done\n";
-        cout << "peak memory: " << ru.ru_maxrss << " KB\n";
-
-        if (ru.ru_maxrss > 256LL * 1024)
-        {
-            cout << "Memory Limit Exceeded (" << ru.ru_maxrss << " KB)\n";
-            return 1;
-        }
-
-        if (WIFSIGNALED(run_status))
-        {
-            int sig = WTERMSIG(run_status);
-            if (sig == SIGALRM)
-            {
-                cout << "Time Limit Exceeded\n";
-            }
-            else
-            {
-                cout << "Runtime Error (signal " << sig << ")\n";
-            }
-            return 1;
-        }
-
-        ifstream got("output.txt");
-        ifstream want(ans_path);
-        string a, b, line;
-        while (getline(got, line))
-        {
-            a += line + "\n";
-        }
-        while (getline(want, line))
-        {
-            b += line + "\n";
-        }
-        if (a == b)
-        {
-            cout << "AC\n";
             passed++;
         }
         else
         {
-            cout << "WA\n";
             return 1;
         }
     }
+    
     if (passed == 0)
     {
         cout << "no test data found\n";
