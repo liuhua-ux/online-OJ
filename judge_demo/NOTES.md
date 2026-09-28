@@ -238,12 +238,16 @@ int main(...)
 | 用例 | 判定 | 关键输出 | 退出码 |
 | --- | --- | --- | --- |
 | `test.cpp` | AC | `all 3 test passed`（只出现一次） | 0 |
-| `bad.cpp`（少分号，临时文件） | CE | `Compile Error (exit code 1)`，g++ 报错原样抓回 | 1 |
+| `ce.cpp`（故意少分号） | CE | `Compile Error (exit code 1)`，g++ 报错原样抓回 | 1 |
 | 把 `2.ans` 改成 999 | WA | `WA`，且**立刻停住**不再跑 Test 3 | 1 |
 | `tle.cpp` | TLE | `Time Limit Exceeded`，1024 KB | 1 |
 | `re.cpp` | RE | `Runtime Error (signal 11)`，1024 KB | 1 |
 | `bigmem.cpp` | MLE | `822912 KB` | 1 |
 | 空目录 | —— | `no test data found` | 1 |
+
+**回归用例已入库**（`judge_demo/` 下）：`ce.cpp` / `tle.cpp` / `re.cpp` / `bigmem.cpp`。
+WA 需要一个"答案不对"的场景，用临时复制一份数据、改掉某个 `.ans` 的方式测，不入库。
+`ce.cpp` 是**故意写错**的，它的"错误"就是它的用途 —— 别顺手修好它。
 
 #### 10.5 `ru_maxrss` 是测量值，不是常数
 
@@ -277,7 +281,7 @@ int main(...)
   - `ls -l --time-style=+%H:%M:%S judge judge.cpp` —— 时间戳谁更新
   - `nm judge | grep run_one_test` —— 二进制里到底有没有这个符号
   - `grep -n "run_one_test" judge.cpp` —— 源码里有没有
-- **临时文件用完就清**：`bad.cpp`、残留的 `test`、`output.txt` —— 它们都会替 bug 打掩护
+- **临时文件用完就清**：残留的 `test` 二进制、`output.txt` —— 它们都会替 bug 打掩护
 
 **仓库也一样**：本地仓库、服务器仓库、GitHub 三者同样会脱节。`push` 被拒就是这个信号 ——
 先 `git pull --rebase` 再 push。`rebase` 会重写提交，hash 变化是正常的。
