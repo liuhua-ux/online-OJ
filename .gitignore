@@ -24,3 +24,8 @@ judge_demo/output.txt
 # CMake 构建目录
 build/
 
+
+# Web 层：虚拟环境与 Python 运行时产物
+web/venv/
+web/__pycache__/
+*.pyc
