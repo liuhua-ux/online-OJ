@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 
 from flask import Flask, request
@@ -13,6 +14,8 @@ app = Flask(__name__)
 JUDGE_DIR = "/home/ubuntu/online-OJ/judge_demo"
 JUDGE_BIN = os.path.join(JUDGE_DIR, "judge")
 TESTDATA_DIR = os.path.join(JUDGE_DIR, "testdata")
+
+JOB_TIMEOUT = 60  # 秒。等超过这么久还没判完，就认为出事了
 
 # ---------- 任务表：编号 -> 这条提交的状态 ----------
 jobs = {}
@@ -74,7 +77,11 @@ def submit():
         job_id = uuid.uuid4().hex[:8]
 
         with jobs_lock:
-            jobs[job_id] = {"status": "排队中", "result": None}
+            jobs[job_id] = {
+                "status": "排队中",
+                "result": None,
+                "created_at": time.time(),  # 什么时候收下的
+            }
 
         job_queue.put((job_id, work_dir))
 
@@ -99,11 +106,22 @@ def result(job_id):
             return "没有这个编号", 404
         status = job["status"]
         text = job["result"]
+        waited = time.time() - job["created_at"]
 
     if status == "完成":
         return "<pre>" + status + "\n\n" + text + "</pre>"
 
-    return "<p>当前状态：" + status + "</p>"
+    if waited > JOB_TIMEOUT:
+        return (
+            "<p>判题异常：已经等了 "
+            + str(round(waited))
+            + " 秒还没出结果，请联系管理员。</p>"
+        )
+
+    return (
+        "<meta http-equiv='refresh' content='2'>"
+        "<p>当前状态：" + status + " ……（页面每 2 秒自动刷新）</p>"
+    )
 
 
 if __name__ == "__main__":
