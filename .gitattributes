@@ -1,0 +1,15 @@
+# 统一换行符：仓库里一律存 LF，检出到工作区也是 LF。
+#
+# 缺了这一行，Windows 上 core.autocrlf=true 会把工作区检出成 CRLF，
+# 这些文件一旦被传回 Linux 服务器提交，git 对象里存的就是 CRLF
+# —— judge_demo/NOTES.md 就是这么被污染的（见提交 1eb2885）。
+#
+# .gitattributes 的优先级高于 core.autocrlf，所以两边的 git 配置都不用改。
+* text=auto eol=lf
+
+# 明确按二进制处理，不做任何换行符转换
+*.pdf  binary
+*.doc  binary
+*.docx binary
+*.png  binary
+*.jpg  binary
