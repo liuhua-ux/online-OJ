@@ -29,3 +29,6 @@ build/
 web/venv/
 __pycache__/
 *.pyc
+
+# 数据库配置（含密码，绝不提交）
+web/db_config.py
