@@ -87,7 +87,8 @@ def submit():
 
         return (
             "<p>已接收，编号 " + job_id + "</p>"
-            "<p><a href='/result/" + job_id + "'>查看结果</a></p>"
+            "<p><a href='/result/" + job_id + "'>查看结果</a>　"
+            "<a href='/submissions'>提交记录</a></p>"
         )
 
     return """
@@ -95,7 +96,34 @@ def submit():
       <textarea name="code" rows="12" cols="70"></textarea><br>
       <button type="submit">提交</button>
     </form>
+    <p><a href='/submissions'>提交记录</a></p>
     """
+
+
+@app.route("/submissions")
+def submissions():
+    with jobs_lock:
+        rows = list(jobs.items())  # 加锁只为了取一份快照
+
+    rows.reverse()  # 最新的排最前面
+
+    html = "<h2>提交记录</h2><table border='1' cellpadding='6'>"
+    html += "<tr><th>编号</th><th>状态</th><th>提交时间</th><th></th></tr>"
+    for job_id, job in rows:
+        t = time.strftime("%m-%d %H:%M:%S", time.localtime(job["created_at"]))
+        html += (
+            "<tr>"
+            "<td>" + job_id + "</td>"
+            "<td>" + job["status"] + "</td>"
+            "<td>" + t + "</td>"
+            "<td><a href='/result/" + job_id + "'>查看</a></td>"
+            "</tr>"
+        )
+    html += "</table>"
+    html += "<p>一共 " + str(len(rows)) + " 条。"
+    html += "（存在内存里，重启 Flask 就没了）</p>"
+    html += "<p><a href='/submit'>再提交一次</a>　<a href='/'>首页</a></p>"
+    return html
 
 
 @app.route("/result/<job_id>")
