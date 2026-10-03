@@ -7,11 +7,15 @@ import tempfile
 import threading
 import uuid
 
-from flask import Flask, request
+import pymysql
+from flask import Flask, request, session
+from werkzeug.security import generate_password_hash, check_password_hash
 
 import db
+import db_config
 
 app = Flask(__name__)
+app.secret_key = db_config.SECRET_KEY   # 印章：给 cookie 签名用
 
 JUDGE_DIR = "/home/ubuntu/online-OJ/judge_demo"
 JUDGE_BIN = os.path.join(JUDGE_DIR, "judge")
@@ -137,6 +141,74 @@ def result(job_id):
         "<meta http-equiv='refresh' content='2'>"
         "<p>当前状态：" + status + " ……（页面每 2 秒自动刷新）</p>"
     )
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form["username"].strip()
+        password = request.form["password"]
+
+        if not username or not password:
+            return "用户名和密码都不能为空"
+
+        pw_hash = generate_password_hash(password)
+        try:
+            db.create_user(username, pw_hash)
+        except pymysql.err.IntegrityError:
+            return "这个用户名已经被注册了"
+
+        return "<p>注册成功</p><p><a href='/register'>再注册一个</a></p>"
+
+    return """
+    <form method="POST">
+      <p>用户名：<input name="username"></p>
+      <p>密码：<input name="password" type="password"></p>
+      <button type="submit">注册</button>
+    </form>
+    """
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form["username"].strip()
+        password = request.form["password"]
+
+        row = db.get_user_by_name(username)
+
+        # 用户不存在 和 密码不对，故意返回同一句话
+        if row is None or not check_password_hash(row[2], password):
+            return "用户名或密码不对"
+
+        # 发票：把「你是谁」写进 cookie，浏览器会自动存下来
+        session["username"] = username
+        return "<p>登录成功</p>\n" \
+               "<p><a href='/whoami'>看看服务器现在认为你是谁</a></p>"
+
+    return """
+    <form method="POST">
+      <p>用户名：<input name="username"></p>
+      <p>密码：<input name="password" type="password"></p>
+      <button type="submit">登录</button>
+    </form>
+    """
+
+
+@app.route("/whoami")
+def whoami():
+    # 取票 + 验签名 + 读票面，Flask 一步做完。注意：没有一行数据库操作
+    name = session.get("username")
+    if name is None:
+        return "<p>服务器认为你是：陌生人（没带票，或者票是假的）</p>"
+    return "<p>服务器认为你是：" + name + "</p>"
+
+
+@app.route("/logout")
+def logout():
+    # 「作废」这张票 —— 其实只是让浏览器把它扔掉
+    session.pop("username", None)
+    return "<p>已退出登录</p><p><a href='/login'>重新登录</a></p>"
 
 
 if __name__ == "__main__":

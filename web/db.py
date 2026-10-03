@@ -70,3 +70,32 @@ def list_jobs():
             return cur.fetchall()
     finally:
         conn.close()
+
+
+def create_user(username, password_hash):
+    """新建用户。用户名重复时，MySQL 会拒绝，这里直接让异常冒出去。"""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (username, password_hash, created_at)"
+                " VALUES (%s, %s, NOW())",
+                (username, password_hash),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_by_name(username):
+    """返回 (user_id, username, password_hash)，没这个用户就返回 None。"""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, username, password_hash FROM users WHERE username = %s",
+                (username,),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
