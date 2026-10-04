@@ -8,7 +8,7 @@ import threading
 import uuid
 
 import pymysql
-from flask import Flask, request, session
+from flask import Flask, redirect, request, session
 from werkzeug.security import generate_password_hash, check_password_hash
 
 import db
@@ -86,6 +86,10 @@ def home():
 
 @app.route("/submit", methods=["GET", "POST"])
 def submit():
+    # 第一行就拦：没登录的话，看表单和交代码都不行
+    if session.get("username") is None:
+        return redirect("/login")
+
     if request.method == "POST":
         code = request.form["code"]
         if not code.strip():
