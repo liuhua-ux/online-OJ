@@ -4,6 +4,7 @@
 -- 提交记录
 CREATE TABLE IF NOT EXISTS submissions (
     job_id      CHAR(8)      NOT NULL,
+    username    VARCHAR(32)  NULL,
     status      VARCHAR(16)  NOT NULL,
     result      MEDIUMTEXT   NULL,
     created_at  DATETIME     NOT NULL,

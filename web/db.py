@@ -17,14 +17,15 @@ def connect():
     )
 
 
-def insert_job(job_id):
+def insert_job(job_id, username):
+    """username 是提交者的用户名；没登录就传 None。"""
     conn = connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO submissions (job_id, status, result, created_at)"
-                " VALUES (%s, %s, NULL, NOW())",
-                (job_id, "排队中"),
+                "INSERT INTO submissions (job_id, username, status, result, created_at)"
+                " VALUES (%s, %s, %s, NULL, NOW())",
+                (job_id, username, "排队中"),
             )
         conn.commit()
     finally:
@@ -64,7 +65,7 @@ def list_jobs():
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT job_id, status, created_at FROM submissions"
+                "SELECT job_id, username, status, created_at FROM submissions"
                 " ORDER BY created_at DESC, job_id DESC"
             )
             return cur.fetchall()

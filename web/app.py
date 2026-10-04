@@ -59,9 +59,29 @@ for _ in range(2):
     threading.Thread(target=worker, daemon=True).start()
 
 
+def nav():
+    """每个页面顶上那条导航。
+
+    写成一个函数，是为了「只写一次」。否则将来想加一个链接，
+    就得把 8 个页面里的 HTML 挨个找出来改一遍，漏一个就断一条路。
+    """
+    name = session.get("username")   # 有票就显示名字，没票就显示登录/注册
+    if name is None:
+        right = "<a href='/login'>登录</a>　<a href='/register'>注册</a>"
+    else:
+        right = "已登录：" + name + "　<a href='/logout'>退出</a>"
+    return (
+        "<div style='border-bottom:1px solid #999;padding:6px;margin-bottom:14px'>"
+        "<a href='/'>首页</a>　"
+        "<a href='/submit'>提交</a>　"
+        "<a href='/submissions'>提交记录</a>　| " + right +
+        "</div>"
+    )
+
+
 @app.route("/")
 def home():
-    return "Hello, OJ!"
+    return nav() + "Hello, OJ!"
 
 
 @app.route("/submit", methods=["GET", "POST"])
@@ -78,21 +98,21 @@ def submit():
 
         job_id = uuid.uuid4().hex[:8]
 
-        db.insert_job(job_id)          # 先落库，再排队
+        # 从 cookie 里读「你是谁」。没登录就是 None，照样能提交
+        db.insert_job(job_id, session.get("username"))   # 先落库，再排队
         job_queue.put((job_id, work_dir))
 
         return (
+            nav() +
             "<p>已接收，编号 " + job_id + "</p>"
-            "<p><a href='/result/" + job_id + "'>查看结果</a>　"
-            "<a href='/submissions'>提交记录</a></p>"
+            "<p><a href='/result/" + job_id + "'>查看结果</a></p>"
         )
 
-    return """
+    return nav() + """
     <form method="POST">
       <textarea name="code" rows="12" cols="70"></textarea><br>
       <button type="submit">提交</button>
     </form>
-    <p><a href='/submissions'>提交记录</a></p>
     """
 
 
@@ -100,13 +120,16 @@ def submit():
 def submissions():
     rows = db.list_jobs()
 
-    html = "<h2>提交记录</h2><table border='1' cellpadding='6'>"
-    html += "<tr><th>编号</th><th>状态</th><th>提交时间</th><th></th></tr>"
-    for job_id, status, created_at in rows:
+    html = nav() + "<h2>提交记录</h2><table border='1' cellpadding='6'>"
+    html += "<tr><th>编号</th><th>提交者</th><th>状态</th><th>提交时间</th><th></th></tr>"
+    for job_id, username, status, created_at in rows:
         t = created_at.strftime("%m-%d %H:%M:%S")
+        # username 是 None 就显示「游客」——老数据没记过，不知道是谁
+        who = username if username is not None else "游客"
         html += (
             "<tr>"
             "<td>" + job_id + "</td>"
+            "<td>" + who + "</td>"
             "<td>" + status + "</td>"
             "<td>" + t + "</td>"
             "<td><a href='/result/" + job_id + "'>查看</a></td>"
@@ -114,7 +137,6 @@ def submissions():
         )
     html += "</table>"
     html += "<p>一共 " + str(len(rows)) + " 条。</p>"
-    html += "<p><a href='/submit'>再提交一次</a>　<a href='/'>首页</a></p>"
     return html
 
 
@@ -122,22 +144,22 @@ def submissions():
 def result(job_id):
     job = db.get_job(job_id)
     if job is None:
-        return "没有这个编号", 404
+        return nav() + "没有这个编号", 404
 
     status, text, created_at = job
     waited = (datetime.datetime.now() - created_at).total_seconds()
 
     if status == "完成":
-        return "<pre>" + status + "\n\n" + text + "</pre>"
+        return nav() + "<pre>" + status + "\n\n" + text + "</pre>"
 
     if waited > JOB_TIMEOUT:
-        return (
+        return nav() + (
             "<p>判题异常：已经等了 "
             + str(round(waited))
             + " 秒还没出结果，请联系管理员。</p>"
         )
 
-    return (
+    return nav() + (
         "<meta http-equiv='refresh' content='2'>"
         "<p>当前状态：" + status + " ……（页面每 2 秒自动刷新）</p>"
     )
@@ -158,9 +180,9 @@ def register():
         except pymysql.err.IntegrityError:
             return "这个用户名已经被注册了"
 
-        return "<p>注册成功</p><p><a href='/register'>再注册一个</a></p>"
+        return nav() + "<p>注册成功，现在可以登录了。</p>"
 
-    return """
+    return nav() + """
     <form method="POST">
       <p>用户名：<input name="username"></p>
       <p>密码：<input name="password" type="password"></p>
@@ -183,10 +205,9 @@ def login():
 
         # 发票：把「你是谁」写进 cookie，浏览器会自动存下来
         session["username"] = username
-        return "<p>登录成功</p>\n" \
-               "<p><a href='/whoami'>看看服务器现在认为你是谁</a></p>"
+        return nav() + "<p>登录成功。去 <a href='/submit'>提交</a> 一题试试。</p>"
 
-    return """
+    return nav() + """
     <form method="POST">
       <p>用户名：<input name="username"></p>
       <p>密码：<input name="password" type="password"></p>
@@ -200,15 +221,15 @@ def whoami():
     # 取票 + 验签名 + 读票面，Flask 一步做完。注意：没有一行数据库操作
     name = session.get("username")
     if name is None:
-        return "<p>服务器认为你是：陌生人（没带票，或者票是假的）</p>"
-    return "<p>服务器认为你是：" + name + "</p>"
+        return nav() + "<p>服务器认为你是：陌生人（没带票，或者票是假的）</p>"
+    return nav() + "<p>服务器认为你是：" + name + "</p>"
 
 
 @app.route("/logout")
 def logout():
     # 「作废」这张票 —— 其实只是让浏览器把它扔掉
-    session.pop("username", None)
-    return "<p>已退出登录</p><p><a href='/login'>重新登录</a></p>"
+    session.pop("username", None)   # 必须在 nav() 之前——否则导航栏还显示着名字
+    return nav() + "<p>已退出登录</p>"
 
 
 if __name__ == "__main__":
