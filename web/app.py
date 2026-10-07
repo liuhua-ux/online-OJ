@@ -9,6 +9,7 @@ import uuid
 
 import pymysql
 from flask import Flask, redirect, request, session
+from markupsafe import escape
 from werkzeug.security import generate_password_hash, check_password_hash
 
 import db
@@ -73,6 +74,7 @@ def nav():
     return (
         "<div style='border-bottom:1px solid #999;padding:6px;margin-bottom:14px'>"
         "<a href='/'>首页</a>　"
+        "<a href='/problems'>题库</a>　"
         "<a href='/submit'>提交</a>　"
         "<a href='/submissions'>提交记录</a>　| " + right +
         "</div>"
@@ -82,6 +84,52 @@ def nav():
 @app.route("/")
 def home():
     return nav() + "Hello, OJ!"
+
+
+@app.route("/problems")
+def problems():
+    rows = db.list_problems()
+
+    html = nav() + "<h2>题目列表</h2>"
+
+    # 一道题都没有时，显示"暂无题目"，不能报错（文档 OJ-PRB-01 异常流程）
+    if not rows:
+        return html + "<p>暂无题目。</p>"
+
+    html += "<table border='1' cellpadding='6'>"
+    html += "<tr><th>题号</th><th>标题</th><th></th></tr>"
+    for problem_id, title in rows:
+        html += (
+            "<tr>"
+            f"<td>{problem_id}</td>"
+            # 标题是别人（管理员）输进来的，必须转义
+            f"<td>{escape(title)}</td>"
+            f"<td><a href='/problem/{problem_id}'>查看</a></td>"
+            "</tr>"
+        )
+    return html + "</table>"
+
+
+@app.route("/problem/<int:problem_id>")
+def problem(problem_id):
+    row = db.get_problem(problem_id)
+    if row is None:
+        return nav() + "没有这道题", 404
+
+    (pid, title, desc, in_fmt, out_fmt, s_in, s_out, tl, ml) = row
+
+    html = nav()
+    html += f"<h2>{pid}. {escape(title)}</h2>"
+    # white-space:pre-wrap —— 让题面里的换行和缩进原样显示（文档 OJ-PRB-02 要求）
+    html += f"<div style='white-space:pre-wrap'>{escape(desc)}</div>"
+    html += f"<h3>输入格式</h3><div style='white-space:pre-wrap'>{escape(in_fmt)}</div>"
+    html += f"<h3>输出格式</h3><div style='white-space:pre-wrap'>{escape(out_fmt)}</div>"
+    html += f"<h3>样例输入</h3><pre>{escape(s_in)}</pre>"
+    html += f"<h3>样例输出</h3><pre>{escape(s_out)}</pre>"
+    html += f"<p>时间限制：{tl} ms　　内存限制：{ml} MB</p>"
+    html += f"<p>共 {db.count_testcases(pid)} 个测试点。</p>"
+    html += "<p><a href='/problems'>← 回题目列表</a></p>"
+    return html
 
 
 @app.route("/submit", methods=["GET", "POST"])
