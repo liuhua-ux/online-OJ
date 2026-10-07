@@ -151,3 +151,37 @@ def count_testcases(problem_id):
             return cur.fetchone()[0]
     finally:
         conn.close()
+
+
+def is_admin(username):
+    """这个人是不是管理员。
+
+    **每次现查数据库，不看 cookie** —— 权限放进 cookie 的话，
+    把某人降权后，他手里那张旧票照样是管理员，直到票过期。
+    跟 /logout 作废不了票是同一个道理。
+    """
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT is_admin FROM users WHERE username = %s",
+                (username,),
+            )
+            row = cur.fetchone()
+            return row is not None and row[0] == 1
+    finally:
+        conn.close()
+
+
+def list_all_problems():
+    """管理页用：连**未发布**和**已软删除**的也列出来（学生看不到的那些）。"""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT problem_id, title, is_published, is_deleted FROM problems"
+                " ORDER BY problem_id"
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()

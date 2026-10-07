@@ -77,13 +77,33 @@ def nav():
         # 用户名是注册时别人自己填的。不转义的话，nav() 被 8 个页面调用
         # = 全站每个页面都成了 XSS 入口
         right = f"已登录：{escape(name)}　<a href='/logout'>退出</a>"
+
+    # 管理员才显示「管理」入口。每一次渲染都现查库（代价：多一次查询）
+    admin_link = ""
+    if name is not None and db.is_admin(name):
+        admin_link = "<a href='/admin/problems'>管理</a>　"
+
     return (
         "<div style='border-bottom:1px solid #999;padding:6px;margin-bottom:14px'>"
         "<a href='/'>首页</a>　"
         "<a href='/problems'>题库</a>　"
+        + admin_link +
         "<a href='/submissions'>提交记录</a>　| " + right +
         "</div>"
     )
+
+
+def admin_guard():
+    """管理页的统一守卫。返回 None = 放行；返回别的 = 直接把这个响应交给浏览器。
+
+    抽出来是因为管理页会越来越多，权限检查只写一次。
+    """
+    name = session.get("username")
+    if name is None:
+        return redirect("/login")
+    if not db.is_admin(name):
+        return nav() + "<p>需要管理员权限。</p>", 403
+    return None
 
 
 @app.route("/")
@@ -148,6 +168,38 @@ def problem(problem_id):
 
     html += "<p><a href='/problems'>← 回题目列表</a></p>"
     return html
+
+
+@app.route("/admin/problems")
+def admin_problems():
+    deny = admin_guard()
+    if deny is not None:
+        return deny
+
+    rows = db.list_all_problems()
+
+    html = nav() + "<h2>题目管理</h2>"
+    if not rows:
+        return html + "<p>还没有题目。</p>"
+
+    html += "<table border='1' cellpadding='6'>"
+    html += "<tr><th>题号</th><th>标题</th><th>状态</th><th>测试点</th></tr>"
+    for problem_id, title, is_published, is_deleted in rows:
+        if is_deleted:
+            state = "已删除（软删除）"
+        elif is_published:
+            state = "已发布"
+        else:
+            state = "草稿（学生看不到）"
+        html += (
+            "<tr>"
+            f"<td>{problem_id}</td>"
+            f"<td>{escape(title)}</td>"
+            f"<td>{escape(state)}</td>"
+            f"<td>{db.count_testcases(problem_id)}</td>"
+            "</tr>"
+        )
+    return html + "</table>"
 
 
 @app.route("/submit")

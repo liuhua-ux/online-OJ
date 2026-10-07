@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
     user_id        INT AUTO_INCREMENT PRIMARY KEY,
     username       VARCHAR(32)  NOT NULL,
     password_hash  VARCHAR(255) NOT NULL,
+    is_admin       TINYINT      NOT NULL DEFAULT 0,   -- 0=学生 1=管理员；不支持自助注册管理员
     created_at     DATETIME     NOT NULL,
     UNIQUE KEY uniq_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
