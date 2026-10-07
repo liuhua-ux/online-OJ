@@ -100,3 +100,48 @@ def get_user_by_name(username):
             return cur.fetchone()
     finally:
         conn.close()
+
+
+def list_problems():
+    """列出「学生看得见」的题目：没被软删除、且已发布。返回 (problem_id, title) 列表。"""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT problem_id, title FROM problems"
+                " WHERE is_deleted = 0 AND is_published = 1"
+                " ORDER BY problem_id"
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def get_problem(problem_id):
+    """查一道题的完整内容。已软删除的题当它不存在（返回 None）。"""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT problem_id, title, description, input_format, output_format,"
+                " sample_input, sample_output, time_limit_ms, memory_limit_mb"
+                " FROM problems WHERE problem_id = %s AND is_deleted = 0",
+                (problem_id,),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def count_testcases(problem_id):
+    """这道题有几组测试点，返回一个整数。"""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM testcases WHERE problem_id = %s",
+                (problem_id,),
+            )
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
