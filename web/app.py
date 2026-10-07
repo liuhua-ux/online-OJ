@@ -70,7 +70,9 @@ def nav():
     if name is None:
         right = "<a href='/login'>登录</a>　<a href='/register'>注册</a>"
     else:
-        right = "已登录：" + name + "　<a href='/logout'>退出</a>"
+        # 用户名是注册时别人自己填的。不转义的话，nav() 被 8 个页面调用
+        # = 全站每个页面都成了 XSS 入口
+        right = f"已登录：{escape(name)}　<a href='/logout'>退出</a>"
     return (
         "<div style='border-bottom:1px solid #999;padding:6px;margin-bottom:14px'>"
         "<a href='/'>首页</a>　"
@@ -178,13 +180,14 @@ def submissions():
         t = created_at.strftime("%m-%d %H:%M:%S")
         # username 是 None 就显示「游客」——老数据没记过，不知道是谁
         who = username if username is not None else "游客"
+        # 这几格都来自数据库，一律转义。不逐个判断「这个安不安全」——省得漏
         html += (
             "<tr>"
-            "<td>" + job_id + "</td>"
-            "<td>" + who + "</td>"
-            "<td>" + status + "</td>"
-            "<td>" + t + "</td>"
-            "<td><a href='/result/" + job_id + "'>查看</a></td>"
+            f"<td>{escape(job_id)}</td>"
+            f"<td>{escape(who)}</td>"
+            f"<td>{escape(status)}</td>"
+            f"<td>{escape(t)}</td>"
+            f"<td><a href='/result/{escape(job_id)}'>查看</a></td>"
             "</tr>"
         )
     html += "</table>"
@@ -202,7 +205,8 @@ def result(job_id):
     waited = (datetime.datetime.now() - created_at).total_seconds()
 
     if status == "完成":
-        return nav() + "<pre>" + status + "\n\n" + text + "</pre>"
+        # text 是判题器输出，里面含编译器照抄的用户源码 —— 必须转义（文档 OJ-PRB-02）
+        return nav() + f"<pre>{escape(status)}\n\n{escape(text)}</pre>"
 
     if waited > JOB_TIMEOUT:
         return nav() + (
@@ -274,7 +278,7 @@ def whoami():
     name = session.get("username")
     if name is None:
         return nav() + "<p>服务器认为你是：陌生人（没带票，或者票是假的）</p>"
-    return nav() + "<p>服务器认为你是：" + name + "</p>"
+    return nav() + f"<p>服务器认为你是：{escape(name)}</p>"
 
 
 @app.route("/logout")
