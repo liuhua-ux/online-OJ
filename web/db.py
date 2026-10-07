@@ -17,15 +17,15 @@ def connect():
     )
 
 
-def insert_job(job_id, username):
-    """username 是提交者的用户名；没登录就传 None。"""
+def insert_job(job_id, username, problem_id):
+    """username 是提交者的用户名（没登录传 None）；problem_id 是交给哪道题。"""
     conn = connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO submissions (job_id, username, status, result, created_at)"
-                " VALUES (%s, %s, %s, NULL, NOW())",
-                (job_id, username, "排队中"),
+                "INSERT INTO submissions (job_id, username, problem_id, status, result, created_at)"
+                " VALUES (%s, %s, %s, %s, NULL, NOW())",
+                (job_id, username, problem_id, "排队中"),
             )
         conn.commit()
     finally:
@@ -60,13 +60,19 @@ def get_job(job_id):
 
 
 def list_jobs():
-    """最新的排最前面。"""
+    """最新的排最前面，顺带把题目标题也带出来。
+
+    用 LEFT JOIN 不是 INNER JOIN —— 老提交的 problem_id 是 NULL，
+    INNER JOIN 会把它们整行丢掉（记录凭空消失）。
+    """
     conn = connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT job_id, username, status, created_at FROM submissions"
-                " ORDER BY created_at DESC, job_id DESC"
+                "SELECT s.job_id, s.username, s.problem_id, p.title, s.status, s.created_at"
+                " FROM submissions s"
+                " LEFT JOIN problems p ON s.problem_id = p.problem_id"
+                " ORDER BY s.created_at DESC, s.job_id DESC"
             )
             return cur.fetchall()
     finally:

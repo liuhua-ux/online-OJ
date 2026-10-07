@@ -77,7 +77,6 @@ def nav():
         "<div style='border-bottom:1px solid #999;padding:6px;margin-bottom:14px'>"
         "<a href='/'>首页</a>　"
         "<a href='/problems'>题库</a>　"
-        "<a href='/submit'>提交</a>　"
         "<a href='/submissions'>提交记录</a>　| " + right +
         "</div>"
     )
@@ -130,15 +129,37 @@ def problem(problem_id):
     html += f"<h3>样例输出</h3><pre>{escape(s_out)}</pre>"
     html += f"<p>时间限制：{tl} ms　　内存限制：{ml} MB</p>"
     html += f"<p>共 {db.count_testcases(pid)} 个测试点。</p>"
+
+    # 下半部分：代码编辑框 + 提交按钮（文档 OJ-PRB-02 要求的版面）
+    if session.get("username") is None:
+        html += "<p><a href='/login'>登录</a>后才能提交本题。</p>"
+    else:
+        html += (
+            "<h3>提交代码</h3>"
+            f"<form method='POST' action='/submit/{pid}'>"
+            "<textarea name='code' rows='14' cols='70'></textarea><br>"
+            "<button type='submit'>提交</button>"
+            "</form>"
+        )
+
     html += "<p><a href='/problems'>← 回题目列表</a></p>"
     return html
 
 
-@app.route("/submit", methods=["GET", "POST"])
-def submit():
+@app.route("/submit")
+def submit_bare():
+    """没有题号的裸提交页不存在了。交题必须从题目详情页进去 —— 这就是 FIX-09 的药。"""
+    return redirect("/problems")
+
+
+@app.route("/submit/<int:problem_id>", methods=["GET", "POST"])
+def submit(problem_id):
     # 第一行就拦：没登录的话，看表单和交代码都不行
     if session.get("username") is None:
         return redirect("/login")
+
+    if db.get_problem(problem_id) is None:
+        return nav() + "没有这道题", 404
 
     if request.method == "POST":
         code = request.form["code"]
@@ -152,17 +173,18 @@ def submit():
 
         job_id = uuid.uuid4().hex[:8]
 
-        # 从 cookie 里读「你是谁」。没登录就是 None，照样能提交
-        db.insert_job(job_id, session.get("username"))   # 先落库，再排队
+        # 三个参数：编号、谁交的、交的哪道题
+        db.insert_job(job_id, session.get("username"), problem_id)   # 先落库，再排队
         job_queue.put((job_id, work_dir))
 
         return (
             nav() +
-            "<p>已接收，编号 " + job_id + "</p>"
-            "<p><a href='/result/" + job_id + "'>查看结果</a></p>"
+            f"<p>已接收，编号 {job_id}（第 {problem_id} 题）</p>"
+            f"<p><a href='/result/{job_id}'>查看结果</a></p>"
         )
 
-    return nav() + """
+    return nav() + f"""
+    <h2>提交到第 {problem_id} 题</h2>
     <form method="POST">
       <textarea name="code" rows="12" cols="70"></textarea><br>
       <button type="submit">提交</button>
@@ -175,15 +197,18 @@ def submissions():
     rows = db.list_jobs()
 
     html = nav() + "<h2>提交记录</h2><table border='1' cellpadding='6'>"
-    html += "<tr><th>编号</th><th>提交者</th><th>状态</th><th>提交时间</th><th></th></tr>"
-    for job_id, username, status, created_at in rows:
+    html += "<tr><th>编号</th><th>题目</th><th>提交者</th><th>状态</th><th>提交时间</th><th></th></tr>"
+    for job_id, username, problem_id, title, status, created_at in rows:
         t = created_at.strftime("%m-%d %H:%M:%S")
         # username 是 None 就显示「游客」——老数据没记过，不知道是谁
         who = username if username is not None else "游客"
+        # problem_id 是 NULL = 这一列引入之前的老数据（跟 username 那个 NULL 不是一回事）
+        which = f"第 {problem_id} 题 {title}" if problem_id is not None else "（老数据·无题号）"
         # 这几格都来自数据库，一律转义。不逐个判断「这个安不安全」——省得漏
         html += (
             "<tr>"
             f"<td>{escape(job_id)}</td>"
+            f"<td>{escape(which)}</td>"
             f"<td>{escape(who)}</td>"
             f"<td>{escape(status)}</td>"
             f"<td>{escape(t)}</td>"

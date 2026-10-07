@@ -1,15 +1,11 @@
 -- OJ 一期：建表脚本
 -- 用法：sudo mysql oj < schema.sql
-
--- 提交记录
-CREATE TABLE IF NOT EXISTS submissions (
-    job_id      CHAR(8)      NOT NULL,
-    username    VARCHAR(32)  NULL,
-    status      VARCHAR(16)  NOT NULL,
-    result      MEDIUMTEXT   NULL,
-    created_at  DATETIME     NOT NULL,
-    PRIMARY KEY (job_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+--
+-- ⚠️ 两件必须知道的事：
+-- 1. 这里的 CREATE TABLE IF NOT EXISTS 只对「还没有这些表」的新库生效。
+--    对已经建好的库，改这个文件**不会**改数据库 —— 那要靠 ALTER TABLE
+--    （见 migrate_add_problem_id.sql）。
+-- 2. 顺序有讲究：带外键的表必须排在它引用的表**后面**，否则建表会失败。
 
 -- 用户
 CREATE TABLE IF NOT EXISTS users (
@@ -47,5 +43,19 @@ CREATE TABLE IF NOT EXISTS testcases (
     answer_size  INT          NOT NULL,   -- 字节
     UNIQUE KEY uniq_problem_ordinal (problem_id, ordinal),
     CONSTRAINT fk_testcase_problem FOREIGN KEY (problem_id)
+        REFERENCES problems(problem_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 提交记录
+-- 必须排在 problems 后面 —— 它有外键指过去
+CREATE TABLE IF NOT EXISTS submissions (
+    job_id      CHAR(8)      NOT NULL,
+    username    VARCHAR(32)  NULL,
+    problem_id  INT          NULL,   -- NULL 只表示「这一列引入之前的老数据」
+    status      VARCHAR(16)  NOT NULL,
+    result      MEDIUMTEXT   NULL,
+    created_at  DATETIME     NOT NULL,
+    PRIMARY KEY (job_id),
+    CONSTRAINT fk_submission_problem FOREIGN KEY (problem_id)
         REFERENCES problems(problem_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
