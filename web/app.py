@@ -31,13 +31,17 @@ job_queue = queue.Queue()
 def worker():
     """后台工人：不停从队列里取任务，判完把结果写回数据库。"""
     while True:
-        job_id, work_dir = job_queue.get()
+        # 队列里除了编号和临时目录，还有「这是哪道题」——工人只能从这里知道
+        job_id, work_dir, problem_id = job_queue.get()
         src_path = os.path.join(work_dir, "submission.cpp")
+
+        # 每道题的测试点在自己的子目录里：testdata/<题号>/1.in ...
+        data_dir = os.path.join(TESTDATA_DIR, str(problem_id))
 
         try:
             db.update_job(job_id, "判题中", None)
             result = subprocess.run(
-                [JUDGE_BIN, src_path, TESTDATA_DIR],
+                [JUDGE_BIN, src_path, data_dir],
                 cwd=work_dir,
                 capture_output=True,
                 text=True,
@@ -175,7 +179,7 @@ def submit(problem_id):
 
         # 三个参数：编号、谁交的、交的哪道题
         db.insert_job(job_id, session.get("username"), problem_id)   # 先落库，再排队
-        job_queue.put((job_id, work_dir))
+        job_queue.put((job_id, work_dir, problem_id))   # 题号也塞进队列，工人要知道判哪道题
 
         return (
             nav() +
