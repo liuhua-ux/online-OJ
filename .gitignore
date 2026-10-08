@@ -18,6 +18,9 @@ judge_demo/test
 judge_demo/pipe_demo
 judge_demo/judge
 judge_demo/output.txt
+
+# 二期服务端（C++）的编译产物
+oj_server/server
 # Visual Studio 本地缓存
 .vs/
 
