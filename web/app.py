@@ -86,7 +86,11 @@ def nav():
     else:
         # 用户名是注册时别人自己填的。不转义的话，nav() 被 8 个页面调用
         # = 全站每个页面都成了 XSS 入口
-        right = f"已登录：{escape(name)}　<a href='/logout'>退出</a>"
+        right = (
+            f"已登录：{escape(name)}　"
+            "<a href='/profile'>个人信息</a>　"
+            "<a href='/logout'>退出</a>"
+        )
 
     # 管理员才显示「管理」入口。每一次渲染都现查库（代价：多一次查询）
     admin_link = ""
@@ -372,7 +376,8 @@ def admin_problems():
     rows = db.list_all_problems()
 
     html = nav() + "<h2>题目管理</h2>"
-    html += "<p><a href='/admin/problem/new'>＋ 新建题目</a></p>"
+    html += ("<p><a href='/admin/problem/new'>＋ 新建题目</a>　"
+             "<a href='/admin/users'>用户管理 →</a></p>")
     if not rows:
         return html + "<p>还没有题目。</p>"
 
@@ -552,9 +557,37 @@ def submit(problem_id):
 
 @app.route("/submissions")
 def submissions():
-    rows = db.list_jobs()
+    me = session.get("username")
+    if me is None:
+        return redirect("/login")               # 需求 OJ-REC-02：需授权页面
 
-    html = nav() + "<h2>提交记录</h2><table border='1' cellpadding='6'>"
+    # 需求 OJ-REC-02：「学生（仅本人）、管理员（可筛选）」
+    if db.is_admin(me):
+        only = request.args.get("user", "").strip()
+        owner = only or None                    # 管理员不筛就看全部
+    else:
+        owner = me                              # 学生只能看自己的
+
+    rows = db.list_jobs(owner=owner, limit=100)
+
+    if owner is None:
+        html = nav() + "<h2>全部提交记录</h2>"
+    elif owner == me:
+        html = nav() + "<h2>我的提交</h2>"
+    else:
+        html = nav() + f"<h2>{escape(owner)} 的提交</h2>"
+
+    # 管理员给个筛选框（GET 表单：只读操作，不会改数据）
+    if db.is_admin(me):
+        html += (
+            "<form method='GET'>"
+            f"<input name='user' value='{escape(owner or '')}' placeholder='按用户名筛选'>"
+            "<button type='submit'>筛选</button>　"
+            "<a href='/submissions'>看全部</a>"
+            "</form>"
+        )
+
+    html += "<table border='1' cellpadding='6'>"
     html += "<tr><th>编号</th><th>题目</th><th>提交者</th><th>状态</th><th>提交时间</th><th></th></tr>"
     for job_id, username, problem_id, title, status, created_at in rows:
         t = created_at.strftime("%m-%d %H:%M:%S")
@@ -580,11 +613,21 @@ def submissions():
 
 @app.route("/result/<job_id>")
 def result(job_id):
+    me = session.get("username")
+    if me is None:
+        return redirect("/login")               # 需求 OJ-REC-01：需授权页面
+
     job = db.get_job(job_id)
     if job is None:
         return nav() + "没有这个编号", 404
 
-    status, text, created_at = job
+    owner, status, text, created_at = job
+
+    # 需求 OJ-REC-01：「用户只能查看自己的提交记录，管理员可查看全部」。
+    # 老数据的 owner 是 NULL，配不上任何人 —— 那就只有管理员看得到。
+    if owner != me and not db.is_admin(me):
+        return nav() + "这是别人的提交记录。", 403
+
     waited = (datetime.datetime.now() - created_at).total_seconds()
 
     if status == "完成":
@@ -642,6 +685,12 @@ def login():
         if row is None or not check_password_hash(row[2], password):
             return "用户名或密码不对"
 
+        # 被禁用的账号不能登录（需求 OJ-SYS-01）。
+        # 放在密码校验**之后**：密码都答对了再说"你被禁用了"，不算泄露信息，
+        # 也不会被人拿来枚举用户名。
+        if row[4]:
+            return "这个账号已被禁用，请联系管理员"
+
         # 发票：把「你是谁」写进 cookie，浏览器会自动存下来
         session["username"] = username
         return nav() + "<p>登录成功。去 <a href='/submit'>提交</a> 一题试试。</p>"
@@ -669,6 +718,183 @@ def logout():
     # 「作废」这张票 —— 其实只是让浏览器把它扔掉
     session.pop("username", None)   # 必须在 nav() 之前——否则导航栏还显示着名字
     return nav() + "<p>已退出登录</p>"
+
+
+def profile_html(username, created_at, is_admin, error=None, notice=None):
+    """个人信息页。抽成函数是因为「成功」和「报错」两条路都要重画这一页。"""
+    html = nav() + "<h2>个人信息</h2>"
+    if error is not None:
+        html += f"<p style='color:#c00;font-weight:bold'>错误：{escape(error)}</p>"
+    if notice is not None:
+        html += f"<p style='color:#080;font-weight:bold'>{escape(notice)}</p>"
+
+    html += (f"<p>用户名：{escape(username)}　"
+             "<span style='color:#666'>（唯一标识，不可修改）</span></p>")
+    html += f"<p>角色：{'管理员' if is_admin else '学生'}</p>"
+    html += f"<p>注册时间：{escape(created_at.strftime('%Y-%m-%d %H:%M:%S'))}</p>"
+
+    html += (
+        "<h3>修改口令</h3>"
+        "<form method='POST'>"
+        "<p>原口令：<input name='old_password' type='password'></p>"
+        "<p>新口令：<input name='new_password' type='password'></p>"
+        "<p>再输一次新口令：<input name='new_password2' type='password'></p>"
+        "<p><button type='submit'>保存</button></p>"
+        "</form>"
+    )
+    return html
+
+
+@app.route("/profile", methods=["GET", "POST"])
+def profile():
+    me = session.get("username")
+    if me is None:
+        return redirect("/login")               # 需求 OJ-USR-03：已登录用户才有
+
+    row = db.get_user_by_name(me)
+    if row is None:
+        return nav() + "账号不存在", 404
+    user_id, _name, pw_hash, is_admin, _disabled, created_at = row
+
+    if request.method == "POST":
+        old = request.form.get("old_password", "")
+        new1 = request.form.get("new_password", "")
+        new2 = request.form.get("new_password2", "")
+
+        # 需求 OJ-USR-03 点名「修改口令需提供原口令」——
+        # 防的是「人走开没锁屏，路过的人顺手把口令改了」
+        if not check_password_hash(pw_hash, old):
+            return profile_html(me, created_at, is_admin, error="原口令不对"), 403
+        if not new1:
+            return profile_html(me, created_at, is_admin, error="新口令不能为空"), 400
+        if new1 != new2:
+            return profile_html(me, created_at, is_admin, error="两次输入的新口令不一样"), 400
+
+        db.update_password(user_id, generate_password_hash(new1))
+        # 注意这里**不会把人踢下线**：票早发出去了，服务端没名单、作废不了（FIX-14）。
+        # 也就是说「改口令」救不回已经泄露出去的票 —— 这片的账记在 FIX-14 名下。
+        return profile_html(me, created_at, is_admin, notice="口令已修改")
+
+    return profile_html(me, created_at, is_admin)
+
+
+@app.route("/admin/users")
+def admin_users():
+    deny = admin_guard()
+    if deny is not None:
+        return deny
+
+    me = session.get("username")
+    rows = db.list_users()
+
+    html = nav() + "<h2>用户管理</h2>"
+    html += "<p><a href='/admin/problems'>← 题目管理</a></p>"
+    html += "<table border='1' cellpadding='6'>"
+    html += ("<tr><th>用户名</th><th>角色</th><th>状态</th><th>注册时间</th>"
+             "<th>重置口令</th><th>操作</th></tr>")
+
+    for user_id, username, admin_flag, disabled_flag, created_at in rows:
+        role = "管理员" if admin_flag else "学生"
+        state = "已禁用" if disabled_flag else "正常"
+        t = created_at.strftime("%Y-%m-%d %H:%M")
+
+        if username == me:
+            # 需求 OJ-SYS-01「管理员不能删除自己的账号」——
+            # 推广到禁用和降权：都是同一件事，别把自己的钥匙亲手拆了
+            state += "（你自己）"
+            reset_cell = "<td>—</td>"
+            ops = "<td>不能对自己操作</td>"
+        else:
+            reset_cell = (
+                "<td><form method='POST'"
+                f" action='/admin/user/{user_id}/reset_password' style='display:inline'>"
+                "<input name='new_password' type='password' size='10' placeholder='新口令'>"
+                "<button type='submit'>重置</button></form></td>"
+            )
+            ops = (
+                "<td>"
+                f"<form method='POST' action='/admin/user/{user_id}/toggle_disabled'"
+                " style='display:inline'><button type='submit'>"
+                f"{'解禁' if disabled_flag else '禁用'}</button></form>　"
+                f"<form method='POST' action='/admin/user/{user_id}/toggle_admin'"
+                " style='display:inline'><button type='submit'>"
+                f"{'收回管理员' if admin_flag else '设为管理员'}</button></form>"
+                "</td>"
+            )
+
+        html += (
+            "<tr>"
+            f"<td>{escape(username)}</td>"
+            f"<td>{role}</td>"
+            f"<td>{escape(state)}</td>"
+            f"<td>{escape(t)}</td>"
+            f"{reset_cell}"
+            f"{ops}"
+            "</tr>"
+        )
+    return html + "</table>"
+
+
+@app.route("/admin/user/<int:user_id>/reset_password", methods=["POST"])
+def admin_reset_password(user_id):
+    deny = admin_guard()
+    if deny is not None:
+        return deny
+
+    # 需求 3.1.1：「遗忘口令需由管理员重置」—— 所以这条路**不要求原口令**
+    if db.get_user_by_id(user_id) is None:
+        return nav() + "没有这个用户", 404
+
+    new = request.form.get("new_password", "")
+    if not new:
+        return nav() + "<p>新口令不能为空。</p>", 400
+
+    db.update_password(user_id, generate_password_hash(new))
+    return redirect("/admin/users")
+
+
+@app.route("/admin/user/<int:user_id>/toggle_disabled", methods=["POST"])
+def admin_toggle_disabled(user_id):
+    deny = admin_guard()
+    if deny is not None:
+        return deny
+
+    me = session.get("username")
+    row = db.get_user_by_id(user_id)
+    if row is None:
+        return nav() + "没有这个用户", 404
+    _uid, username, admin_flag, disabled_flag = row
+
+    if username == me:
+        return nav() + "<p>不能禁用自己。</p>", 400
+
+    # 需求 OJ-SYS-01：「系统中至少保留一个可用管理员账号」
+    if not disabled_flag and admin_flag and db.count_active_admins() <= 1:
+        return nav() + "<p>这是最后一个可用的管理员，不能禁用。</p>", 400
+
+    db.set_disabled(user_id, not disabled_flag)
+    return redirect("/admin/users")
+
+
+@app.route("/admin/user/<int:user_id>/toggle_admin", methods=["POST"])
+def admin_toggle_admin(user_id):
+    deny = admin_guard()
+    if deny is not None:
+        return deny
+
+    me = session.get("username")
+    row = db.get_user_by_id(user_id)
+    if row is None:
+        return nav() + "没有这个用户", 404
+    _uid, username, admin_flag, _disabled_flag = row
+
+    if username == me:
+        return nav() + "<p>不能收回自己的管理员权限。</p>", 400
+    if admin_flag and db.count_active_admins() <= 1:
+        return nav() + "<p>这是最后一个管理员，不能收回。</p>", 400
+
+    db.set_admin(user_id, not admin_flag)
+    return redirect("/admin/users")
 
 
 if __name__ == "__main__":
