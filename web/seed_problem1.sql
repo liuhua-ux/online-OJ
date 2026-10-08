@@ -2,7 +2,7 @@
 -- 用法：sudo mysql --default-character-set=utf8mb4 oj < seed_problem1.sql
 --
 -- 时限/内存填的是「判题器里写死的值」：judge.cpp 里 alarm(2) = 2 秒，
--- MLE 阈值 256MB。这样至少值是对得上的（见 FIX-17：限制还没真正传进判题器）。
+-- MLE 阈值 256MB。这样至少值是对得上的（见 FIX-18：限制还没真正传进判题器）。
 
 INSERT INTO problems
     (problem_id, title, description, input_format, output_format,
