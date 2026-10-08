@@ -56,12 +56,15 @@ CREATE TABLE IF NOT EXISTS submissions (
     problem_id  INT          NULL,   -- NULL 只表示「这一列引入之前的老数据」
     status      VARCHAR(16)  NOT NULL,
     result      MEDIUMTEXT   NULL,   -- 判题器原始输出（出怪问题时唯一的现场）
+    created_at  DATETIME     NOT NULL,
+    -- ⚠️ FIX-06 这几列在实际库里排在 created_at **之后** ——
+    -- 因为 ALTER TABLE ADD COLUMN 默认往**最后**加，不认你心里想的顺序。
+    -- 这里跟实际库保持一致，免得「新库」和「老库」列顺序不同。
     verdict     VARCHAR(8)   NULL,   -- AC/WA/TLE/MLE/RE/CE/NO_DATA；老数据为 NULL
     passed      INT          NULL,   -- 过了几组
     total       INT          NULL,   -- 共几组
     time_ms     INT          NULL,   -- 最慢那一组的耗时（毫秒）
     memory_kb   INT          NULL,   -- 各组峰值内存里的最大值（KB）
-    created_at  DATETIME     NOT NULL,
     PRIMARY KEY (job_id),
     CONSTRAINT fk_submission_problem FOREIGN KEY (problem_id)
         REFERENCES problems(problem_id)

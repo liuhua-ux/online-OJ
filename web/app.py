@@ -758,6 +758,7 @@ def result(job_id):
 
     if status == "完成":
         html = nav()
+        html += f"<p>提交时间：{escape(created_at.strftime('%Y-%m-%d %H:%M:%S'))}</p>"
 
         # FIX-06：把解析好的结构化字段摆出来（需求 OJ-REC-01 点名要这几样）。
         # 老数据（引入这些列之前的提交）是 NULL —— 那一行直接不显示，
