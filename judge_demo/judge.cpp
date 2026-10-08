@@ -65,7 +65,7 @@ bool compile(string src)
 
 // 跑一组数据并判定
 // true = AC，false = 不通过（具体原因函数内已打印）
-bool run_one_test(string in_path, string ans_path)
+bool run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
 {
     pid_t run_pid = fork();
     if (run_pid == 0)
@@ -88,7 +88,7 @@ bool run_one_test(string in_path, string ans_path)
         lim.rlim_max = 1024LL * 1024 * 1024;
         setrlimit(RLIMIT_AS, &lim);
 
-        alarm(2);
+        alarm((tl_ms+999)/1000);
 
         execlp("./test", "./test", (char *)NULL);
         cerr << "run exec failed\n";
@@ -102,7 +102,7 @@ bool run_one_test(string in_path, string ans_path)
     cout << "run done\n";
     cout << "peak memory: " << ru.ru_maxrss << " KB\n";
 
-    if (ru.ru_maxrss > 256LL * 1024)
+    if (ru.ru_maxrss > ml_mb * 1024)
     {
         cout << "Memory Limit Exceeded (" << ru.ru_maxrss << " KB)\n";
         return false; // 父进程 ①
@@ -152,6 +152,9 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    int tl_ms = (argc > 3) ? atoi(argv[3]) : 2000;   // 缺省值保持老行为
+    int ml_mb = (argc > 4) ? atoi(argv[4]) : 256;
+
     if (!compile(argv[1]))
     {
         return 1;
@@ -168,7 +171,7 @@ int main(int argc, char *argv[])
         }
         cout << "Test " << i << "\n";
 
-        if (run_one_test(in_path, ans_path))
+        if (run_one_test(in_path, ans_path, tl_ms, ml_mb))
         {
             passed++;
         }
