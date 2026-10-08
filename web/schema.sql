@@ -55,7 +55,12 @@ CREATE TABLE IF NOT EXISTS submissions (
     username    VARCHAR(32)  NULL,
     problem_id  INT          NULL,   -- NULL 只表示「这一列引入之前的老数据」
     status      VARCHAR(16)  NOT NULL,
-    result      MEDIUMTEXT   NULL,
+    result      MEDIUMTEXT   NULL,   -- 判题器原始输出（出怪问题时唯一的现场）
+    verdict     VARCHAR(8)   NULL,   -- AC/WA/TLE/MLE/RE/CE/NO_DATA；老数据为 NULL
+    passed      INT          NULL,   -- 过了几组
+    total       INT          NULL,   -- 共几组
+    time_ms     INT          NULL,   -- 最慢那一组的耗时（毫秒）
+    memory_kb   INT          NULL,   -- 各组峰值内存里的最大值（KB）
     created_at  DATETIME     NOT NULL,
     PRIMARY KEY (job_id),
     CONSTRAINT fk_submission_problem FOREIGN KEY (problem_id)

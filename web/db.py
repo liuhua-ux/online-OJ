@@ -45,17 +45,72 @@ def update_job(job_id, status, result):
         conn.close()
 
 
-def get_job(job_id):
-    """返回 (提交者, 状态, 判题结果, 提交时间)，没有就返回 None。
+def finish_job(job_id, result_text, summary):
+    """判题完成：写回原始输出 **+** 解析出来的结构化字段（FIX-06）。
 
-    为什么要带出「提交者」：`/result` 要靠它回答「**这条是不是你的**」
-    （需求 OJ-REC-01：用户只能查看自己的提交记录）。老数据的这一列是 NULL。
+    summary 是 app.py 从判题器输出里抠出来的 dict：
+    verdict / passed / total / time_ms / memory_kb。
+
+    为什么两份都要留：
+    - `result`（原始文本）是**现场证据** —— 判题器行为怪的时候，只有它能查
+    - 结构化字段是**给页面和排行榜用的** —— 不然每次都得去 LIKE 匹配一堆文本
+    只留文本，排行榜要猜；只留字段，出事没现场可查。
     """
     conn = connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT username, status, result, created_at"
+                "UPDATE submissions SET status = %s, result = %s, verdict = %s,"
+                " passed = %s, total = %s, time_ms = %s, memory_kb = %s"
+                " WHERE job_id = %s",
+                ("完成", result_text, summary["verdict"], summary["passed"],
+                 summary["total"], summary["time_ms"], summary["memory_kb"], job_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def rank():
+    """排行榜数据（需求 OJ-RNK-01）：按通过题数从多到少。返回 [(用户名, 通过题数), ...]。
+
+    `COUNT(DISTINCT problem_id)` 是这条需求的核心 —— **同一题多次通过只算一次**，
+    否则反复交同一道题就能刷分。
+
+    只认 `verdict = 'AC'`：FIX-06 之前的老提交没有这个字段，**不计入** ——
+    「没记过」不能当「通过了」用。
+    """
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT username, COUNT(DISTINCT problem_id) AS solved"
+                " FROM submissions"
+                " WHERE verdict = 'AC'"
+                "   AND username IS NOT NULL AND problem_id IS NOT NULL"
+                " GROUP BY username"
+                " ORDER BY solved DESC, username"
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def get_job(job_id):
+    """返回 (提交者, 状态, 判题结果, 提交时间, 结论, 过了几组, 共几组, 耗时ms, 峰值KB)，
+    没有这条记录就返回 None。
+
+    为什么要带出「提交者」：`/result` 要靠它回答「**这条是不是你的**」
+    （需求 OJ-REC-01：用户只能查看自己的提交记录）。老数据的这一列是 NULL。
+
+    末尾那五个是 FIX-06 的结构化字段 —— **老数据全是 NULL**，页面要区别对待。
+    """
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT username, status, result, created_at,"
+                " verdict, passed, total, time_ms, memory_kb"
                 " FROM submissions WHERE job_id = %s",
                 (job_id,),
             )

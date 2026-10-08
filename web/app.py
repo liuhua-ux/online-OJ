@@ -1,6 +1,8 @@
 import datetime
+import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import tempfile
@@ -8,6 +10,7 @@ import threading
 import uuid
 
 import pymysql
+import redis
 from flask import Flask, redirect, request, session
 from markupsafe import escape
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -24,6 +27,13 @@ TESTDATA_DIR = os.path.join(JUDGE_DIR, "testdata")
 
 JOB_TIMEOUT = 60  # 秒。等超过这么久还没判完，就认为出事了
 
+# ---------- 排行榜缓存（需求 OJ-RNK-01） ----------
+# 注意 redis.Redis(...) 只是**造一个对象**，并不马上连服务器 ——
+# 所以 Redis 没起来也不会在这里炸，等第一次真正用它才知道。
+redis_client = redis.Redis(host="127.0.0.1", port=6379, decode_responses=True)
+RANK_CACHE_KEY = "oj:rank"
+RANK_CACHE_TTL = 60   # 秒。榜单是派生数据，过期后重算就行
+
 # ---------- 队列：还没判的提交排在这里 ----------
 job_queue = queue.Queue()
 
@@ -36,6 +46,72 @@ PROBLEM_FIELDS = [
     ("sample_input", "样例输入", 4),
     ("sample_output", "样例输出", 4),
 ]
+
+
+def parse_result(judge_output):
+    """把判题器的输出抠成结构化字段（FIX-06）。
+
+    抠四样：结论、过了几组、最慢那组的耗时、各组峰值内存的最大值。
+    「共几组」判题器**不打**（它靠"探测下一个 .ans 在不在"决定停不停），
+    所以那一个得从库里数 —— 见 worker 里那句 count_testcases。
+
+    判题器输出里跟这四样有关的样子（一行一条，所以用 ^...$ 锚死）：
+        VERDICT: AC
+        AC                       ← 每通过一组打一个
+        time: 2 ms
+        peak memory: 3584 KB
+    """
+    m = re.search(r"^VERDICT: (\w+)$", judge_output, re.M)
+    times = [int(x) for x in re.findall(r"^time: (\d+) ms$", judge_output, re.M)]
+    mems = [int(x) for x in re.findall(r"^peak memory: (\d+) KB$", judge_output, re.M)]
+    return {
+        # 判题器自己都跑挂的时候（没有输出）m 是 None，这里就如实留 None
+        "verdict": m.group(1) if m else None,
+        "passed": len(re.findall(r"^AC$", judge_output, re.M)),
+        # 取**最大值**：最慢的那组、占用最高的那组，才是这道题的真实开销
+        "time_ms": max(times) if times else None,
+        "memory_kb": max(mems) if mems else None,
+    }
+
+
+def get_rank_rows():
+    """取排行榜数据。返回 (rows, 是否来自缓存)。
+
+    需求 OJ-RNK-01 点名两件事：
+    1. 用 Redis 缓存，避免每次访问都全表扫描提交记录
+    2. **「缓存不可用 → 降级为直接查询数据库，不得因缓存故障导致页面不可用」**
+
+    所以每一次 Redis 调用都**单独**包在 try/except 里：
+    读缓存失败 → 当它没有，去查库；写缓存失败 → 无所谓，照样返回。
+    缓存坏了顶多慢一点，**页面绝不能打不开**。
+    """
+    try:
+        cached = redis_client.get(RANK_CACHE_KEY)
+        if cached is not None:
+            return json.loads(cached), True
+    except Exception as e:
+        print("rank cache read failed:", repr(e))
+
+    rows = db.rank()
+
+    try:
+        redis_client.setex(RANK_CACHE_KEY, RANK_CACHE_TTL, json.dumps(rows))
+    except Exception as e:
+        print("rank cache write failed:", repr(e))
+
+    return rows, False
+
+
+def invalidate_rank_cache():
+    """判题通过后让榜单作废，下次访问重新算。
+
+    只在 **AC** 的时候调 —— 其他结论（WA / TLE / …）不会改变「谁通过了哪道题」，
+    每次都删的话，缓存就白做了。
+    """
+    try:
+        redis_client.delete(RANK_CACHE_KEY)
+    except Exception as e:
+        print("rank cache invalidate failed:", repr(e))
 
 
 def worker():
@@ -61,13 +137,21 @@ def worker():
                 text=True,
             )
             text = "exit code: " + str(result.returncode) + "\n\n" + result.stdout
+            judge_output = result.stdout      # 解析只认判题器自己的输出，不含那行 exit code
         except Exception as e:
             text = "判题器出错了：" + repr(e)
+            judge_output = ""                 # 判题器都没跑起来，没有结论可解析
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
         try:
-            db.update_job(job_id, "完成", text)
+            summary = parse_result(judge_output)
+            # 「共几组」判题器不打，从库里数（这就是 FIX-06 里那句「换成结构化字段」）
+            summary["total"] = db.count_testcases(problem_id)
+            db.finish_job(job_id, text, summary)
+            # 只有通过才可能改变榜单，其他结论不用惊动缓存
+            if summary["verdict"] == "AC":
+                invalidate_rank_cache()
         except Exception as e:
             # 不能让工人线程死掉，否则队列会堵死
             print("failed to save result for", job_id, repr(e))
@@ -105,6 +189,7 @@ def nav():
         "<div style='border-bottom:1px solid #999;padding:6px;margin-bottom:14px'>"
         "<a href='/'>首页</a>　"
         "<a href='/problems'>题库</a>　"
+        "<a href='/rank'>排行榜</a>　"
         + admin_link +
         "<a href='/submissions'>提交记录</a>　| " + right +
         "</div>"
@@ -622,6 +707,35 @@ def submissions():
     return html
 
 
+@app.route("/rank")
+def rank_page():
+    me = session.get("username")
+    if me is None:
+        return redirect("/login")               # 需求 OJ-RNK-01：登录用户
+
+    rows, from_cache = get_rank_rows()
+
+    html = nav() + "<h2>排行榜</h2>"
+    # 标出数据是从哪来的 —— 演示「Redis 挂了会降级查库」时一眼能看见
+    html += ("<p style='color:#666'>数据来源：" +
+             ("Redis 缓存" if from_cache else "直接查数据库") + "</p>")
+
+    if not rows:
+        return html + "<p>还没有人通过任何题目。</p>"
+
+    html += "<table border='1' cellpadding='6'>"
+    html += "<tr><th>名次</th><th>用户</th><th>通过题数</th></tr>"
+    for i, (username, solved) in enumerate(rows, start=1):
+        html += (
+            "<tr>"
+            f"<td>{i}</td>"
+            f"<td>{escape(username)}</td>"
+            f"<td>{solved}</td>"
+            "</tr>"
+        )
+    return html + "</table>"
+
+
 @app.route("/result/<job_id>")
 def result(job_id):
     me = session.get("username")
@@ -632,7 +746,8 @@ def result(job_id):
     if job is None:
         return nav() + "没有这个编号", 404
 
-    owner, status, text, created_at = job
+    (owner, status, text, created_at,
+     verdict, passed, total, time_ms, memory_kb) = job
 
     # 需求 OJ-REC-01：「用户只能查看自己的提交记录，管理员可查看全部」。
     # 老数据的 owner 是 NULL，配不上任何人 —— 那就只有管理员看得到。
@@ -642,8 +757,23 @@ def result(job_id):
     waited = (datetime.datetime.now() - created_at).total_seconds()
 
     if status == "完成":
+        html = nav()
+
+        # FIX-06：把解析好的结构化字段摆出来（需求 OJ-REC-01 点名要这几样）。
+        # 老数据（引入这些列之前的提交）是 NULL —— 那一行直接不显示，
+        # 而不是显示成"通过 None/None 组"。
+        if verdict is not None:
+            parts = [f"结论：<b>{escape(verdict)}</b>"]
+            if total is not None:
+                parts.append(f"通过 {passed}/{total} 组")
+            if time_ms is not None:
+                parts.append(f"最慢一组 {time_ms} ms")
+            if memory_kb is not None:
+                parts.append(f"峰值内存 {memory_kb} KB")
+            html += "<p>" + "　".join(parts) + "</p>"
+
         # text 是判题器输出，里面含编译器照抄的用户源码 —— 必须转义（文档 OJ-PRB-02）
-        return nav() + f"<pre>{escape(status)}\n\n{escape(text)}</pre>"
+        return html + f"<pre>{escape(status)}\n\n{escape(text)}</pre>"
 
     if waited > JOB_TIMEOUT:
         return nav() + (
