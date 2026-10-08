@@ -587,6 +587,9 @@ def submissions():
             "</form>"
         )
 
+    if not rows:
+        return html + "<p>还没有提交记录。</p>"    # 需求 OJ-REC-02：无记录 → 空状态
+
     html += "<table border='1' cellpadding='6'>"
     html += "<tr><th>编号</th><th>题目</th><th>提交者</th><th>状态</th><th>提交时间</th><th></th></tr>"
     for job_id, username, problem_id, title, status, created_at in rows:
@@ -868,7 +871,12 @@ def admin_toggle_disabled(user_id):
     if username == me:
         return nav() + "<p>不能禁用自己。</p>", 400
 
-    # 需求 OJ-SYS-01：「系统中至少保留一个可用管理员账号」
+    # 需求 OJ-SYS-01：「系统中至少保留一个可用管理员账号」。
+    #   其实上面那句「不能禁用自己」**已经**把这条兜住了：操作者自己必然是
+    #   活跃管理员，又不能对自己动手，所以真想禁掉谁，场上至少有两个管理员，
+    #   弄完还剩一个。这条需求是「不能对自己操作」的推论，不用单独检查。
+    #   这里留一道显式检查，是防着将来有人放开「对自己操作」——
+    #   （诚实说：按现在的代码路径它触发不了。）
     if not disabled_flag and admin_flag and db.count_active_admins() <= 1:
         return nav() + "<p>这是最后一个可用的管理员，不能禁用。</p>", 400
 
@@ -890,6 +898,9 @@ def admin_toggle_admin(user_id):
 
     if username == me:
         return nav() + "<p>不能收回自己的管理员权限。</p>", 400
+    # 同 toggle_disabled 里的说明：真正的保证是上面「不能对自己操作」。
+    # 这一道会在目标**已被禁用的管理员**身上触发（那种情况下 count 可能真到 1），
+    # 属于偏严的一侧 —— 宁可少给一次操作，也不把系统锁死。
     if admin_flag and db.count_active_admins() <= 1:
         return nav() + "<p>这是最后一个管理员，不能收回。</p>", 400
 
