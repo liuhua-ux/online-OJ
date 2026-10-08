@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <csignal>
 #include <sys/resource.h>
+#include <ctime>
 using namespace std;
 
 // 编译 src 到 ./test
@@ -64,8 +65,8 @@ bool compile(string src)
 }
 
 // 跑一组数据并判定
-// true = AC，false = 不通过（具体原因函数内已打印）
-bool run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
+// 返回结论字符串："AC" / "WA" / "TLE" / "MLE" / "RE"（具体原因函数内已打印）
+string run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
 {
     pid_t run_pid = fork();
     if (run_pid == 0)
@@ -97,15 +98,22 @@ bool run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
 
     int run_status;
     struct rusage ru;
+    struct timespec t0,t1;
+    clock_gettime(CLOCK_MONOTONIC,&t0);
+
     wait4(run_pid, &run_status, 0, &ru);
+
+    clock_gettime(CLOCK_MONOTONIC,&t1);
+    long cost_ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
 
     cout << "run done\n";
     cout << "peak memory: " << ru.ru_maxrss << " KB\n";
+    cout << "time: " << cost_ms << " ms\n";
 
     if (ru.ru_maxrss > ml_mb * 1024)
     {
         cout << "Memory Limit Exceeded (" << ru.ru_maxrss << " KB)\n";
-        return false; // 父进程 ①
+        return "MLE"; // 父进程 ①
     }
     if (WIFSIGNALED(run_status))
     {
@@ -113,12 +121,13 @@ bool run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
         if (sig == SIGALRM)
         {
             cout << "Time Limit Exceeded\n";
+            return "TLE";
         }
         else
         {
             cout << "Runtime Error (signal " << sig << ")\n";
-        }
-        return false; // 父进程 ②
+            return "RE";
+        } 
     }
 
     ifstream got("output.txt");
@@ -135,12 +144,12 @@ bool run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
     if (a == b)
     {
         cout << "AC\n";
-        return true; // AC
+        return "AC"; // AC
     }
     else
     {
         cout << "WA\n";
-        return false; // 父进程 ③
+        return "WA"; // 父进程 ③
     }
 }
 
@@ -157,6 +166,7 @@ int main(int argc, char *argv[])
 
     if (!compile(argv[1]))
     {
+        cout << "VERDICT: CE\n";
         return 1;
     }
     int passed = 0;
@@ -171,20 +181,24 @@ int main(int argc, char *argv[])
         }
         cout << "Test " << i << "\n";
 
-        if (run_one_test(in_path, ans_path, tl_ms, ml_mb))
+        string v = run_one_test(in_path, ans_path, tl_ms, ml_mb);
+        if(v == "AC")
         {
             passed++;
         }
-        else
-        {
-            return 1;
+        else 
+        { 
+            cout << "VERDICT: " << v << "\n"; 
+            return 1; 
         }
     }
     
-    if (passed == 0)
-    {
-        cout << "no test data found\n";
-        return 1;
+    if (passed == 0) 
+    { 
+        cout << "no test data found\n"; cout << "VERDICT: NO_DATA\n"; 
+        return 1; 
     }
     cout << "all " << passed << " test passed\n";
+    cout << "VERDICT: AC\n";
+    return 0;
 }
