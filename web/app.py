@@ -536,11 +536,10 @@ def submit(problem_id):
         db.insert_job(job_id, session.get("username"), problem_id)   # 先落库，再排队
         job_queue.put((job_id, work_dir, problem_id))   # 题号也塞进队列，工人要知道判哪道题
 
-        return (
-            nav() +
-            f"<p>已接收，编号 {job_id}（第 {problem_id} 题）</p>"
-            f"<p><a href='/result/{job_id}'>查看结果</a></p>"
-        )
+        # 存完就跳走（PRG）—— 不跳的话，学生在这个页面上按 F5，
+        # 浏览器会把刚才那个 POST **重发一遍**：同一份代码交两次、白判一次题（FIX-22）。
+        # 跳过去之后地址栏是一个普通 GET，F5 只是重新看一眼结果页。
+        return redirect(f"/result/{job_id}")
 
     return nav() + f"""
     <h2>提交到第 {problem_id} 题</h2>
