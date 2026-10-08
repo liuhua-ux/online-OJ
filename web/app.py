@@ -27,6 +27,16 @@ JOB_TIMEOUT = 60  # 秒。等超过这么久还没判完，就认为出事了
 # ---------- 队列：还没判的提交排在这里 ----------
 job_queue = queue.Queue()
 
+# 题目表单里的字段：(字段名, 中文标签, 文本框行数)。行数 1 = 单行输入框，其余是 textarea
+PROBLEM_FIELDS = [
+    ("title", "标题", 1),
+    ("description", "题面", 10),
+    ("input_format", "输入格式", 4),
+    ("output_format", "输出格式", 4),
+    ("sample_input", "样例输入", 4),
+    ("sample_output", "样例输出", 4),
+]
+
 
 def worker():
     """后台工人：不停从队列里取任务，判完把结果写回数据库。"""
@@ -106,6 +116,189 @@ def admin_guard():
     return None
 
 
+def normalize_newlines(text):
+    """把浏览器交上来的多行文本统一成 \\n 换行。
+
+    ⚠️ 这一步不做，从管理页配的测试点会**判谁都是 WA**：
+    判题器比对答案是「逐行 getline 读、行尾补一个 \\n、再拼成整串比」（judge.cpp）。
+    答案文件里若是 "5\\r\\n"，拼出来就是 "5\\r\\n"；而选手程序在 Linux 上
+    用 cout 输出的是 "5\\n" —— 差一个看不见的 \\r，字符串就是不相等。
+    （HTTP 表单提交的多行文本，换行本来就规定是 \\r\\n，所以这条路上必然会遇到。
+      顺带一提：判题器是「按行比」，所以结尾多一个少一个换行不影响结果。）
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def parse_positive_int(raw, label):
+    """解析一个正整数。返回 (值, 错误信息)，出错时值为 None。
+
+    坑：int("abc") 是**抛异常**，不是返回个什么。不接住的话，
+    管理员手滑填个字母，整个页面就是 500。
+    文档 OJ-PRB-03 要求「时限/内存填非正数或非数字 → 拒绝保存」，就在这兑现。
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        return None, f"{label}要填整数，不能是「{raw}」"
+    if value <= 0:
+        return None, f"{label}要填正数"
+    return value, None
+
+
+def read_text(path):
+    """读一个测试点文件。文件不在了就当空串 —— 页面还能开出来，
+    看得到「库里说有这组、盘上却没有」，不用靠猜。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
+def load_testcases_from_disk(problem_id):
+    """把这道题的测试点读回来填进表单。返回 [(输入文本, 答案文本), ...]。
+
+    按库里的元信息找文件（相对路径是相对 testdata/ 的，如 "1/1.in"）——
+    库和盘哪边不对，这儿就会露出马脚，而不是安静地显示错内容。
+    """
+    cases = []
+    for _ordinal, in_path, ans_path in db.list_testcases(problem_id):
+        cases.append((
+            read_text(os.path.join(TESTDATA_DIR, in_path)),
+            read_text(os.path.join(TESTDATA_DIR, ans_path)),
+        ))
+    return cases
+
+
+def save_testcases_to_disk(problem_id, cases):
+    """把测试点写到 testdata/<题号>/，按顺序从 1 重新编号。返回元信息列表。
+
+    ⚠️ 先**把目录整个清掉**再写。只覆盖前 N 个文件是不够的：
+    原来 3 组，删掉中间一组变成 2 组，如果只写 1.in / 2.in，
+    磁盘上那个旧的 3.in 还躺着 —— 判题器恰恰是靠「探测下一个 .ans 存不存在」
+    来决定还有没有数据的，它会把这份**陈年数据**捞起来接着判。
+    删掉的文件不会自己消失，这是「删除」这个动作最容易被忘掉的一半。
+    """
+    pdir = os.path.join(TESTDATA_DIR, str(problem_id))
+    if os.path.isdir(pdir):
+        shutil.rmtree(pdir)
+    os.makedirs(pdir)
+
+    meta = []
+    for ordinal, (in_text, ans_text) in enumerate(cases, start=1):
+        # 按字节写：不受平台换行处理影响，字节数也算得准
+        in_bytes = normalize_newlines(in_text).encode("utf-8")
+        ans_bytes = normalize_newlines(ans_text).encode("utf-8")
+        with open(os.path.join(pdir, f"{ordinal}.in"), "wb") as f:
+            f.write(in_bytes)
+        with open(os.path.join(pdir, f"{ordinal}.ans"), "wb") as f:
+            f.write(ans_bytes)
+        # 库里存相对路径：换服务器、换目录，库里的数据一个字都不用改
+        meta.append((
+            f"{problem_id}/{ordinal}.in", f"{problem_id}/{ordinal}.ans",
+            len(in_bytes), len(ans_bytes),
+        ))
+    return meta
+
+
+def read_problem_form(form):
+    """从提交的表单里读题目字段和测试点。返回 (values, cases, error)。"""
+    values = {name: normalize_newlines(form.get(name, "")) for name, _, _ in PROBLEM_FIELDS}
+    values["title"] = values["title"].strip()
+
+    if not values["title"]:
+        return values, [], "标题不能为空"
+    for name, label, _rows in PROBLEM_FIELDS:
+        # 样例允许留空（有的题不展示样例）；其余必填
+        if name in ("title", "sample_input", "sample_output"):
+            continue
+        if not values[name].strip():
+            return values, [], f"{label}不能为空"
+
+    time_limit_ms, err = parse_positive_int(form.get("time_limit_ms", ""), "时间限制")
+    if err is not None:
+        return values, [], err
+    memory_limit_mb, err = parse_positive_int(form.get("memory_limit_mb", ""), "内存限制")
+    if err is not None:
+        return values, [], err
+    values["time_limit_ms"] = time_limit_ms
+    values["memory_limit_mb"] = memory_limit_mb
+
+    # 测试点：用两个 getlist 一次全取出来。每个块里都是「先 tc_in 后 tc_ans」，
+    # 所以两个列表天然一一对应 —— 不用给每组起名字，加组删组也就不用改编号
+    ins = form.getlist("tc_in")
+    answers = form.getlist("tc_ans")
+    if len(ins) != len(answers):
+        return values, [], "表单读到的输入框与答案框对不上，请刷新页面重来"
+
+    cases = []
+    for in_text, ans_text in zip(ins, answers):
+        in_text = normalize_newlines(in_text)
+        ans_text = normalize_newlines(ans_text)
+        # 两个都空的块 = 没用上的空位，丢掉。「删掉中间一组」也是走的这条路
+        if not in_text.strip() and not ans_text.strip():
+            continue
+        cases.append((in_text, ans_text))
+
+    return values, cases, None
+
+
+def problem_form_html(action, values, testcases=(), extra_rows=0, error=None,
+                      with_testcases=False):
+    """题目表单。新建页和编辑页共用它，靠 with_testcases 区分。
+
+    values 是字段字典 —— 报错重画时把**管理员刚填的内容原样放回去**，
+    不让他白填一遍（这是表单页的基本礼貌）。
+    """
+    html = nav()
+    if error is not None:
+        html += f"<p style='color:#c00;font-weight:bold'>保存失败：{escape(error)}</p>"
+
+    html += f"<form method='POST' action='{escape(action)}'>"
+
+    for name, label, rows in PROBLEM_FIELDS:
+        text = escape(values.get(name, ""))
+        if rows == 1:
+            html += f"<p>{label}<br><input name='{name}' size='60' value=\"{text}\"></p>"
+        else:
+            html += f"<p>{label}<br><textarea name='{name}' rows='{rows}' cols='80'>{text}</textarea></p>"
+
+    html += (
+        "<p>时间限制（毫秒）<input name='time_limit_ms' size='8'"
+        f" value=\"{escape(values.get('time_limit_ms', ''))}\">　"
+        "内存限制（MB）<input name='memory_limit_mb' size='8'"
+        f" value=\"{escape(values.get('memory_limit_mb', ''))}\"></p>"
+    )
+
+    if with_testcases:
+        checked = " checked" if values.get("is_published") else ""
+        html += (
+            "<p><label><input type='checkbox' name='is_published' value='1'"
+            f"{checked}> 发布（不勾 = 草稿，学生看不到）</label></p>"
+        )
+
+        html += "<h3>测试点</h3>"
+        html += (
+            "<p>判题按 1、2、3…… 顺序跑，遇到第一个不通过就停。<br>"
+            "<b>序号不用你操心</b>：保存时服务端按顺序统一重新编号。"
+            "要删中间的某一组，把它的两个框清空即可，后面的会自动补上来。</p>"
+        )
+
+        # 现有测试点之后再垫一个空位（extra_rows 来自「＋ 再加一个空位」链接）
+        blocks = list(testcases) + [("", "")] * (extra_rows + 1)
+        for i, (in_text, ans_text) in enumerate(blocks, start=1):
+            html += f"<h4>第 {i} 组</h4>"
+            html += ("<p>输入<br><textarea name='tc_in' rows='4' cols='80'>"
+                     f"{escape(in_text)}</textarea></p>")
+            html += ("<p>答案<br><textarea name='tc_ans' rows='4' cols='80'>"
+                     f"{escape(ans_text)}</textarea></p>")
+        # 纯链接，不需要 JavaScript —— 点一下就再多一个空位（POST 时这个 ?rows= 也在）
+        html += f"<p><a href='{escape(action)}?rows={extra_rows + 1}'>＋ 再加一个空位</a></p>"
+
+    html += "<p><button type='submit'>保存</button></p></form>"
+    return html
+
+
 @app.route("/")
 def home():
     return nav() + "Hello, OJ!"
@@ -179,27 +372,137 @@ def admin_problems():
     rows = db.list_all_problems()
 
     html = nav() + "<h2>题目管理</h2>"
+    html += "<p><a href='/admin/problem/new'>＋ 新建题目</a></p>"
     if not rows:
         return html + "<p>还没有题目。</p>"
 
     html += "<table border='1' cellpadding='6'>"
-    html += "<tr><th>题号</th><th>标题</th><th>状态</th><th>测试点</th></tr>"
+    html += "<tr><th>题号</th><th>标题</th><th>状态</th><th>测试点</th><th></th></tr>"
     for problem_id, title, is_published, is_deleted in rows:
         if is_deleted:
+            # 软删除的题连编辑入口都不给：update_problem 里那句
+            # `AND is_deleted = 0` 会让改动影响 0 行 —— 界面上干脆别让人点
             state = "已删除（软删除）"
-        elif is_published:
-            state = "已发布"
+            actions = "<td colspan='2'>—</td>"
         else:
-            state = "草稿（学生看不到）"
+            state = "已发布" if is_published else "草稿（学生看不到）"
+            actions = _edit_delete_cells(problem_id)
         html += (
             "<tr>"
             f"<td>{problem_id}</td>"
             f"<td>{escape(title)}</td>"
             f"<td>{escape(state)}</td>"
             f"<td>{db.count_testcases(problem_id)}</td>"
+            f"{actions}"
             "</tr>"
         )
     return html + "</table>"
+
+
+def _edit_delete_cells(problem_id):
+    """一行的「编辑 / 删除」两个格子。"""
+    return (
+        f"<td><a href='/admin/problem/{problem_id}/edit'>编辑</a></td>"
+        "<td>"
+        # 删除必须走 POST：GET 在 HTTP 里的约定是「安全的」——浏览器会预取、
+        # 爬虫会顺着链接爬。把删除做成一个 GET 链接，等于谁的爬虫扫一遍你的站，
+        # 题就没了。（改和删同理，所以按钮都放在 <form> 里，不当链接用）
+        f"<form method='POST' action='/admin/problem/{problem_id}/delete'"
+        " style='display:inline'>"
+        "<button type='submit'>删除</button></form>"
+        "</td>"
+    )
+
+
+@app.route("/admin/problem/new", methods=["GET", "POST"])
+def admin_new_problem():
+    deny = admin_guard()
+    if deny is not None:
+        return deny
+
+    if request.method == "POST":
+        values, _cases, error = read_problem_form(request.form)
+        if error is not None:
+            return problem_form_html("/admin/problem/new", values, error=error), 400
+
+        # 新建一律是草稿（create_problem 里 is_published 写死 0），
+        # 所以这条路上根本没有「没有测试点却发布成功」的机会
+        new_id = db.create_problem(
+            values["title"], values["description"], values["input_format"],
+            values["output_format"], values["sample_input"], values["sample_output"],
+            values["time_limit_ms"], values["memory_limit_mb"],
+        )
+        # 存完就跳走（POST 完紧接着 redirect）：不跳的话，管理员一按 F5，
+        # 浏览器会把这份表单**再交一遍**，库里就多出一道一模一样的题
+        return redirect(f"/admin/problem/{new_id}/edit")
+
+    return problem_form_html("/admin/problem/new",
+                             {name: "" for name, _, _ in PROBLEM_FIELDS})
+
+
+@app.route("/admin/problem/<int:problem_id>/edit", methods=["GET", "POST"])
+def admin_edit_problem(problem_id):
+    deny = admin_guard()
+    if deny is not None:
+        return deny
+
+    row = db.get_problem_for_admin(problem_id)
+    if row is None:
+        return nav() + "没有这道题", 404
+    if row[10]:     # is_deleted
+        return nav() + ("这道题已删除（软删除），不能再编辑。"
+                        "<a href='/admin/problems'>回题目管理</a>"), 403
+
+    action = f"/admin/problem/{problem_id}/edit"
+
+    if request.method == "POST":
+        values, cases, error = read_problem_form(request.form)
+        publish = request.form.get("is_published") == "1"
+        values["is_published"] = publish
+
+        # 文档 OJ-PRB-03：题目必须先配置至少一个测试点才能发布
+        # （否则判题器拿不到数据，交上来一律不通过，见 OJ-JDG-06）
+        if error is None and publish and not cases:
+            error = "这道题一个测试点都没有，不能发布 —— 请先填好测试点，再勾「发布」"
+        if error is not None:
+            return problem_form_html(action, values, cases, error=error,
+                                     with_testcases=True), 400
+
+        # ⚠️ 顺序：先落盘，再改库。
+        # 判题器只认磁盘，磁盘才是「真相」，库里的元信息只是账本。
+        # 万一写到一半断了：磁盘是对的、账本偏旧 —— 判出来的结果**是准的**，
+        # 只是页面上「共 N 个测试点」的数字偏小。
+        # 反过来先记账本：页面写着 5 组、判题器手里只有 3 组数据，那是**判错**，
+        # 性质严重得多。两边都可能不一致时，挑「错得轻」的那边。
+        meta = save_testcases_to_disk(problem_id, cases)
+        db.update_problem(
+            problem_id, values["title"], values["description"],
+            values["input_format"], values["output_format"],
+            values["sample_input"], values["sample_output"],
+            values["time_limit_ms"], values["memory_limit_mb"], publish,
+        )
+        db.replace_testcases(problem_id, meta)
+        return redirect("/admin/problems")
+
+    values = {
+        "title": row[1], "description": row[2], "input_format": row[3],
+        "output_format": row[4], "sample_input": row[5], "sample_output": row[6],
+        "time_limit_ms": row[7], "memory_limit_mb": row[8], "is_published": row[9],
+    }
+    extra_rows = request.args.get("rows", type=int) or 0
+    return problem_form_html(action, values, load_testcases_from_disk(problem_id),
+                             extra_rows=extra_rows, with_testcases=True)
+
+
+@app.route("/admin/problem/<int:problem_id>/delete", methods=["POST"])
+def admin_delete_problem(problem_id):
+    deny = admin_guard()
+    if deny is not None:
+        return deny
+
+    # 只是标记，不是真删（见 db.soft_delete_problem 里的理由）
+    db.soft_delete_problem(problem_id)
+    return redirect("/admin/problems")
 
 
 @app.route("/submit")
