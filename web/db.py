@@ -159,6 +159,27 @@ def get_problem(problem_id):
         conn.close()
 
 
+def get_problem_limits(problem_id):
+    """只要这道题的时限和内存上限 —— 判题时要传给判题器（需求 OJ-PRB-02：「不得仅作展示」）。
+
+    返回 (time_limit_ms, memory_limit_mb)；题不存在、或已软删除 → 返回 None。
+
+    单独一个函数、只查两列：`/submit` 每次都要调它，没必要把题面那种大字段（MEDIUMTEXT）
+    也拖出来。
+    """
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT time_limit_ms, memory_limit_mb FROM problems"
+                " WHERE problem_id = %s AND is_deleted = 0",
+                (problem_id,),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
 def count_testcases(problem_id):
     """这道题有几组测试点，返回一个整数。"""
     conn = connect()

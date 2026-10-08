@@ -41,8 +41,9 @@ PROBLEM_FIELDS = [
 def worker():
     """后台工人：不停从队列里取任务，判完把结果写回数据库。"""
     while True:
-        # 队列里除了编号和临时目录，还有「这是哪道题」——工人只能从这里知道
-        job_id, work_dir, problem_id = job_queue.get()
+        # 队列里除了编号和临时目录，还有「这是哪道题」和它的限制 —— 工人只能从这里知道
+        (job_id, work_dir, problem_id,
+         time_limit_ms, memory_limit_mb) = job_queue.get()
         src_path = os.path.join(work_dir, "submission.cpp")
 
         # 每道题的测试点在自己的子目录里：testdata/<题号>/1.in ...
@@ -51,7 +52,10 @@ def worker():
         try:
             db.update_job(job_id, "判题中", None)
             result = subprocess.run(
-                [JUDGE_BIN, src_path, data_dir],
+                # 最后两个是这道题的时限和内存上限 —— 判题器不再写死 alarm(2)/256MB
+                # （需求 OJ-PRB-02：「不得仅作展示」）
+                [JUDGE_BIN, src_path, data_dir,
+                 str(time_limit_ms), str(memory_limit_mb)],
                 cwd=work_dir,
                 capture_output=True,
                 text=True,
@@ -522,7 +526,8 @@ def submit(problem_id):
     if session.get("username") is None:
         return redirect("/login")
 
-    if db.get_problem(problem_id) is None:
+    limits = db.get_problem_limits(problem_id)
+    if limits is None:
         return nav() + "没有这道题", 404
 
     if request.method == "POST":
@@ -537,9 +542,12 @@ def submit(problem_id):
 
         job_id = uuid.uuid4().hex[:8]
 
-        # 三个参数：编号、谁交的、交的哪道题
-        db.insert_job(job_id, session.get("username"), problem_id)   # 先落库，再排队
-        job_queue.put((job_id, work_dir, problem_id))   # 题号也塞进队列，工人要知道判哪道题
+        # 先落库，再排队
+        db.insert_job(job_id, session.get("username"), problem_id)
+        # 题号 + 这道题的时限/内存一起塞进队列 —— 工人拿这几个去调判题器。
+        # 在**入队时**取限制、而不是判题时现查：学生看的详情页就是这组值，
+        # 拿它判才公平（管理员中途改了限制，不该影响已经交上来的人）
+        job_queue.put((job_id, work_dir, problem_id, limits[0], limits[1]))
 
         # 存完就跳走（PRG）—— 不跳的话，学生在这个页面上按 F5，
         # 浏览器会把刚才那个 POST **重发一遍**：同一份代码交两次、白判一次题（FIX-22）。
