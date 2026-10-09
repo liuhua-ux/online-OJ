@@ -51,6 +51,7 @@ int main()
 
         char buf[4096];
         string req;
+        size_t head_end = string::npos;
         while (true)
         {
             ssize_t n = read(conn_fd, buf, sizeof(buf));
@@ -66,12 +67,13 @@ int main()
             }
 
             req.append(buf, n);
-            if (req.find("\r\n\r\n") != string::npos)
+            head_end = req.find("\r\n\r\n");
+            if (head_end != string::npos)
             {
-                cout << "=== request received ===\n"
-                     << req << "\n"
-                     << flush;
-                break;
+                    cout << "=== request received ===\n"
+                         << req << "\n"
+                         << flush;
+                    break;
             }
         }
 
@@ -116,14 +118,30 @@ int main()
             cout << kv.first << "=" << kv.second << "\n";
         }
 
+        size_t body_need = 0;
         if (headers.count("Content-Length"))
         {
             length = headers["Content-Length"];
             cout << " body length = " << length << "\n";
+            body_need = stoi(length);
+            while (req.size() < head_end + 4 + body_need)
+            {
+                ssize_t n = read(conn_fd, buf, sizeof(buf));
+                if (n <= 0)
+                    break;
+                req.append(buf, n);
+            }
+            cout << " body = [" << req.substr(head_end + 4, body_need) << "]\n";
         }
         else
         {
             cout << "no body" << "\n";
+        }
+
+        size_t total_len = head_end + 4 + body_need;
+        if(req.size()>total_len)
+        {
+            cout << "粘包：多出 " << req.size()-total_len << " 字节，属于下一个请求（本步不处理）\n";
         }
 
         string body = "Hello, OJ\n";
