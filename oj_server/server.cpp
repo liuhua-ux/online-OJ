@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <map>
+#include <string>
 using namespace std;
 
 int main()
@@ -49,63 +50,80 @@ int main()
         }
 
         char buf[4096];
-        ssize_t n = read(conn_fd, buf, sizeof(buf) - 1);
-        if (n > 0)
+        string req;
+        while (true)
         {
-            buf[n] = '\0';
-            cout << "=== request received ===\n"
-                 << buf << "\n"
-                 << flush;
-            istringstream iss(buf);
-            string method, target, version;
-            iss >> method >> target >> version;
-            cout << "method  = " << method << endl;
-            cout << "target  = " << target << endl;
-            cout << "version = " << version << endl;
-
-            string line;
-            string length;
-            getline(iss, line);
-            map<string, string> headers;
-            while (getline(iss, line))
+            ssize_t n = read(conn_fd, buf, sizeof(buf));
+            if (n == 0)
             {
-                if (!line.empty() && line.back() == '\r')
-                {
-                    line.pop_back();
-                }
-                if (line.empty())
-                {
-                    break;
-                }
-                size_t pos = line.find(':');
-                if (pos == string::npos)
-                    continue;
-
-                string name = line.substr(0, pos);
-                string value = line.substr(pos + 1);
-                if (!value.empty() && value.front() == ' ')
-                {
-                    value.erase(0, 1);
-                }
-
-                headers[name] = value;
-                cout << "[" << line << "]   长度 = " << line.size() << endl;
+                break;
             }
 
-            for (const auto &kv : headers)
+            if (n < 0)
             {
-                cout << kv.first << "=" << kv.second << "\n";
+                cout << "don't connect" << "\n";
+                break;
             }
 
-            if (headers.count("Content-Length"))
+            req.append(buf, n);
+            if (req.find("\r\n\r\n") != string::npos)
             {
-                length = headers["Content-Length"];
-                cout << " body length = " << length << "\n";
+                cout << "=== request received ===\n"
+                     << req << "\n"
+                     << flush;
+                break;
             }
-            else
+        }
+
+        istringstream iss(req);
+        string method, target, version;
+        iss >> method >> target >> version;
+        cout << "method  = " << method << endl;
+        cout << "target  = " << target << endl;
+        cout << "version = " << version << endl;
+
+        string line;
+        string length;
+        getline(iss, line);
+        map<string, string> headers;
+        while (getline(iss, line))
+        {
+            if (!line.empty() && line.back() == '\r')
             {
-                cout << "no body" << "\n";
+                line.pop_back();
             }
+            if (line.empty())
+            {
+                break;
+            }
+            size_t pos = line.find(':');
+            if (pos == string::npos)
+                continue;
+
+            string name = line.substr(0, pos);
+            string value = line.substr(pos + 1);
+            if (!value.empty() && value.front() == ' ')
+            {
+                value.erase(0, 1);
+            }
+
+            headers[name] = value;
+            cout << "[" << line << "]   长度 = " << line.size() << endl;
+        }
+
+        for (const auto &kv : headers)
+        {
+            cout << kv.first << "=" << kv.second << "\n";
+        }
+
+        if (headers.count("Content-Length"))
+        {
+            length = headers["Content-Length"];
+            cout << " body length = " << length << "\n";
+        }
+        else
+        {
+            cout << "no body" << "\n";
         }
 
         string body = "Hello, OJ\n";
@@ -117,7 +135,7 @@ int main()
                                      "\r\n" +
             body;
         write(conn_fd, resp.c_str(), resp.size());
-        close(conn_fd); 
+        close(conn_fd);
     }
 
     return 0;
