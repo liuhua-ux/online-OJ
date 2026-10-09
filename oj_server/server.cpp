@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <cstring>
 #include <iostream>
+#include <sstream>
+#include <map>
 using namespace std;
 
 int main()
@@ -51,9 +53,59 @@ int main()
         if (n > 0)
         {
             buf[n] = '\0';
-            cout << "=== 收到请求 ===\n"
+            cout << "=== request received ===\n"
                  << buf << "\n"
                  << flush;
+            istringstream iss(buf);
+            string method, target, version;
+            iss >> method >> target >> version;
+            cout << "method  = " << method << endl;
+            cout << "target  = " << target << endl;
+            cout << "version = " << version << endl;
+
+            string line;
+            string length;
+            getline(iss, line);
+            map<string, string> headers;
+            while (getline(iss, line))
+            {
+                if (!line.empty() && line.back() == '\r')
+                {
+                    line.pop_back();
+                }
+                if (line.empty())
+                {
+                    break;
+                }
+                size_t pos = line.find(':');
+                if (pos == string::npos)
+                    continue;
+
+                string name = line.substr(0, pos);
+                string value = line.substr(pos + 1);
+                if (!value.empty() && value.front() == ' ')
+                {
+                    value.erase(0, 1);
+                }
+
+                headers[name] = value;
+                cout << "[" << line << "]   长度 = " << line.size() << endl;
+            }
+
+            for (const auto &kv : headers)
+            {
+                cout << kv.first << "=" << kv.second << "\n";
+            }
+
+            if (headers.count("Content-Length"))
+            {
+                length = headers["Content-Length"];
+                cout << " body length = " << length << "\n";
+            }
+            else
+            {
+                cout << "no body" << "\n";
+            }
         }
 
         string body = "Hello, OJ\n";
@@ -62,9 +114,10 @@ int main()
             "Content-Type: text/plain; charset=utf-8\r\n"
             "Content-Length: " +
             to_string(body.size()) + "\r\n"
-            "\r\n" 
-            + body;
+                                     "\r\n" +
+            body;
         write(conn_fd, resp.c_str(), resp.size());
+        close(conn_fd); 
     }
 
     return 0;
