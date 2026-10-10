@@ -8,6 +8,37 @@
 #include <string>
 using namespace std;
 
+void send_response(int conn_fd, int code, const string &body, const string &content_type = "text/plain; charset=utf-8")
+{
+    string reason;
+    if (code == 200)
+    {
+        reason = "OK";
+    }
+    else if (code == 404)
+    {
+        reason = "Not Found";
+    }
+    else if (code == 500)
+    {
+        reason = "Internal Server Error";
+    }
+    else
+    {
+        reason = "Unknown";
+    }
+
+    string resp = "HTTP/1.1 " + to_string(code) + " " + reason + "\r\n"
+                                                                 "Content-Type: " +
+                  content_type + "\r\n"
+                                 "Content-Length: " +
+                  to_string(body.size()) + "\r\n"
+                                           "\r\n" +
+                  body;
+
+    write(conn_fd, resp.c_str(), resp.size());
+}
+
 int main()
 {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -70,10 +101,10 @@ int main()
             head_end = req.find("\r\n\r\n");
             if (head_end != string::npos)
             {
-                    cout << "=== request received ===\n"
-                         << req << "\n"
-                         << flush;
-                    break;
+                cout << "=== request received ===\n"
+                     << req << "\n"
+                     << flush;
+                break;
             }
         }
 
@@ -139,22 +170,37 @@ int main()
         }
 
         size_t total_len = head_end + 4 + body_need;
-        if(req.size()>total_len)
+        if (req.size() > total_len)
         {
-            cout << "粘包：多出 " << req.size()-total_len << " 字节，属于下一个请求（本步不处理）\n";
+            cout << "粘包：多出 " << req.size() - total_len << " 字节，属于下一个请求（本步不处理）\n";
         }
 
-        string body = "Hello, OJ\n";
-        string resp =
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain; charset=utf-8\r\n"
-            "Content-Length: " +
-            to_string(body.size()) + "\r\n"
-                                     "\r\n" +
-            body;
-        write(conn_fd, resp.c_str(), resp.size());
+        if (target == "/")
+        {
+            string home = 
+            R"(<!DOCTYPE html>
+            <html>
+            <head>
+            <meta charset="utf-8">
+            <title>自研 OJ</title>
+            </head>
+            <body>
+            <h1>Hello, OJ</h1>
+            <p>这是二期 C++ 自研服务端</p>
+            <p><a href="/about">关于</a></p>
+            </body>
+            </html>)";
+            send_response(conn_fd, 200, home, "text/html; charset=utf-8");
+        }
+        else if (target == "/about")
+        {
+            send_response(conn_fd, 200, "c++自研服务器\n");
+        }
+        else
+        {
+            send_response(conn_fd, 404, "请输入正确的网址\n");
+        }
         close(conn_fd);
     }
-
     return 0;
 }
