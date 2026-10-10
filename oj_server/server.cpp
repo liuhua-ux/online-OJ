@@ -184,13 +184,21 @@ int main()
             string home = ss.str();
             send_response(conn_fd, 200, home, "text/html; charset=utf-8");
         }
-        else if (target == "/about")
-        {
-            send_response(conn_fd, 200, "c++自研服务器\n");
-        }
         else
         {
-            send_response(conn_fd, 404, "请输入正确的网址\n");
+            string road = "www" + target;
+            ifstream f(road);
+            if (f.is_open())
+            {
+                stringstream ss;
+                ss << f.rdbuf();
+                string resource = ss.str();
+                send_response(conn_fd, 200, resource, "text/html; charset=utf-8");
+            }
+            else
+            {
+                send_response(conn_fd, 404, "请输入正确的网址\n");
+            }
         }
         close(conn_fd);
     }
