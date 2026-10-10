@@ -6,6 +6,7 @@
 #include <sstream>
 #include <map>
 #include <string>
+#include <fstream>
 using namespace std;
 
 void send_response(int conn_fd, int code, const string &body, const string &content_type = "text/plain; charset=utf-8")
@@ -177,19 +178,10 @@ int main()
 
         if (target == "/")
         {
-            string home = 
-            R"(<!DOCTYPE html>
-            <html>
-            <head>
-            <meta charset="utf-8">
-            <title>自研 OJ</title>
-            </head>
-            <body>
-            <h1>Hello, OJ</h1>
-            <p>这是二期 C++ 自研服务端</p>
-            <p><a href="/about">关于</a></p>
-            </body>
-            </html>)";
+            ifstream f("www/index.html");
+            stringstream ss;
+            ss << f.rdbuf();
+            string home = ss.str();
             send_response(conn_fd, 200, home, "text/html; charset=utf-8");
         }
         else if (target == "/about")
