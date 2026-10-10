@@ -72,6 +72,14 @@ int main()
 
     cout << "listening on 8080.....\n"
          << flush;
+
+    map<string, string> types;
+    types["html"] = "text/html; charset=utf-8";
+    types["css"] = "text/css; charset=utf-8";
+    types["js"] = "application/javascript; charset=utf-8";
+    types["png"] = "image/png";
+    types[""] = "application/octet-stream";
+
     while (true)
     {
         int conn_fd = accept(listen_fd, NULL, NULL);
@@ -188,12 +196,28 @@ int main()
         {
             string road = "www" + target;
             ifstream f(road);
+            string ext;
+            size_t pos = road.rfind('.');
+            string type;
+
+            if (pos != string::npos)
+            {
+                ext = road.substr(pos + 1, road.size() - pos);
+            }
+            if (types.count(ext))
+            {
+                type = types[ext];
+            }
+            else
+            {
+                type = types[""];
+            }
             if (f.is_open())
             {
                 stringstream ss;
                 ss << f.rdbuf();
                 string resource = ss.str();
-                send_response(conn_fd, 200, resource, "text/html; charset=utf-8");
+                send_response(conn_fd, 200, resource, type);
             }
             else
             {

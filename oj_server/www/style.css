@@ -1,0 +1,14 @@
+body {
+    font-family: sans-serif;
+    background: #f5f7fa;
+    color: #223;
+    margin: 40px;
+    line-height: 1.7;
+}
+h1 {
+    color: #c0392b;
+    border-bottom: 3px solid #c0392b;
+    display: inline-block;
+    padding-bottom: 4px;
+}
+a { color: #2980b9; }
