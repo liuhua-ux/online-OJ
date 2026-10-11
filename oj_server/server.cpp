@@ -42,6 +42,68 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
     write(conn_fd, resp.c_str(), resp.size());
 }
 
+int hexval(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F')
+    {
+        return c - 'A' + 10;
+    }
+    else
+    {
+        return -1;
+    }
+}
+
+string urldecode(const string &s)
+{
+    string out;
+    for (size_t i = 0; i < s.size(); i++)
+    {
+        if (s[i] == '+')
+        {
+            out += ' ';
+        }
+        else if (s[i] == '%' && i + 2 < s.size() &&
+                 hexval(s[i + 1]) >= 0 && hexval(s[i + 2]) >= 0)
+        {
+            out += (char)(hexval(s[i + 1]) * 16 + hexval(s[i + 2]));
+            i += 2;
+        }
+        else
+        {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+map<string, string> parse_form(const string &body)
+{
+    map<string, string> form;
+    istringstream iss(body);
+    string pair;
+    while (getline(iss, pair, '&'))
+    {
+        size_t eq = pair.find('=');
+        if (eq == string::npos)
+        {
+            continue;
+        }
+        string key = pair.substr(0, eq);
+        string val = pair.substr(eq + 1);
+        form[urldecode(key)] = urldecode(val);
+    }
+    return form;
+}
+
 int main()
 {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -119,6 +181,12 @@ int main()
             }
         }
 
+        if (head_end == string::npos)
+        {
+            close(conn_fd);
+            continue;
+        }
+
         istringstream iss(req);
         string method, target, version;
         iss >> method >> target >> version;
@@ -178,6 +246,13 @@ int main()
         else
         {
             cout << "no body" << "\n";
+        }
+
+        string body = req.substr(head_end + 4, body_need);
+        map<string, string> form = parse_form(body);
+        for (const auto &kv : form)
+        {
+            cout << "form: " << kv.first << " = " << kv.second << "\n";
         }
 
         size_t total_len = head_end + 4 + body_need;
