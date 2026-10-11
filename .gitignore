@@ -21,8 +21,9 @@ judge_demo/output.txt
 
 # 二期服务端（C++）的编译产物
 oj_server/server
-# Visual Studio 本地缓存
+# 编辑器本地缓存（Visual Studio / VS Code）
 .vs/
+.vscode/
 
 # CMake 构建目录
 build/

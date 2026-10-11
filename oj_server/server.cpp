@@ -7,6 +7,8 @@
 #include <map>
 #include <string>
 #include <fstream>
+#include <climits>
+#include <cstdlib>
 using namespace std;
 
 void send_response(int conn_fd, int code, const string &body, const string &content_type = "text/plain; charset=utf-8")
@@ -195,33 +197,58 @@ int main()
         else
         {
             string road = "www" + target;
-            ifstream f(road);
-            string ext;
-            size_t pos = road.rfind('.');
-            string type;
 
-            if (pos != string::npos)
+            char root_buf[PATH_MAX];
+            char full_buf[PATH_MAX];
+            char *root_p = realpath("www", root_buf);
+            char *full_p = realpath(road.c_str(), full_buf);
+
+            string root, real;
+            if (root_p != NULL)
             {
-                ext = road.substr(pos + 1, road.size() - pos);
+                root = root_buf;
             }
-            if (types.count(ext))
+            if (full_p != NULL)
             {
-                type = types[ext];
+                real = full_buf;
             }
-            else
-            {
-                type = types[""];
-            }
-            if (f.is_open())
-            {
-                stringstream ss;
-                ss << f.rdbuf();
-                string resource = ss.str();
-                send_response(conn_fd, 200, resource, type);
-            }
-            else
+
+            bool ok = !root.empty() && real.compare(0, root.size() + 1, root + "/") == 0;
+            if (!ok)
             {
                 send_response(conn_fd, 404, "请输入正确的网址\n");
+            }
+
+            else
+            {
+                ifstream f(road);
+                string ext;
+                size_t pos = road.rfind('.');
+                string type;
+
+                if (pos != string::npos)
+                {
+                    ext = road.substr(pos + 1, road.size() - pos);
+                }
+                if (types.count(ext))
+                {
+                    type = types[ext];
+                }
+                else
+                {
+                    type = types[""];
+                }
+                if (f.is_open())
+                {
+                    stringstream ss;
+                    ss << f.rdbuf();
+                    string resource = ss.str();
+                    send_response(conn_fd, 200, resource, type);
+                }
+                else
+                {
+                    send_response(conn_fd, 404, "请输入正确的网址\n");
+                }
             }
         }
         close(conn_fd);
