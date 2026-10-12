@@ -330,6 +330,7 @@ int main()
         }
         else
         {
+            target = urldecode(target);
             string road = "www" + target;
 
             char root_buf[PATH_MAX];
