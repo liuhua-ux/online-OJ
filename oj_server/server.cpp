@@ -67,7 +67,7 @@ string urldecode(const string &s, bool plus_is_space = true)
     string out;
     for (size_t i = 0; i < s.size(); i++)
     {
-        if (plus_is_space == true && s[i] == '+')
+        if (plus_is_space && s[i] == '+')
         {
             out += ' ';
         }
@@ -107,25 +107,25 @@ map<string, string> parse_form(const string &body)
 string html_escape(const string &page)
 {
     string out;
-    for(size_t i = 0;i<page.size();i++)
+    for (size_t i = 0; i < page.size(); i++)
     {
-        if(page[i]=='&')
+        if (page[i] == '&')
         {
             out += "&amp;";
         }
-        else if(page[i]=='<')
+        else if (page[i] == '<')
         {
             out += "&lt;";
         }
-        else if(page[i]=='>')
+        else if (page[i] == '>')
         {
             out += "&gt;";
         }
-        else if(page[i]=='"')
+        else if (page[i] == '"')
         {
             out += "&quot;";
         }
-        else 
+        else
         {
             out += page[i];
         }
@@ -310,14 +310,33 @@ int main()
             {
                 stringstream page;
                 page << "<!DOCTYPE html>\n"
-                     << "<html><head><meta charset=\"utf-8\"><title>回显</title></head>\n"
+                     << "<html lang=\"zh-CN\">\n"
+                     << "<head>\n"
+                     << "<meta charset=\"utf-8\">\n"
+                     << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+                     << "<title>回显结果 · 自研 OJ</title>\n"
+                     << "<link rel=\"stylesheet\" href=\"/style.css\">\n"
+                     << "</head>\n"
                      << "<body>\n"
+                     << "<header class=\"nav\">\n"
+                     << "<a class=\"brand\" href=\"/\">自研 OJ</a>\n"
+                     << "<nav>\n"
+                     << "<a href=\"/\">首页</a>\n"
+                     << "<a href=\"/about.html\">关于</a>\n"
+                     << "<a href=\"/echo\">回显测试</a>\n"
+                     << "</nav>\n"
+                     << "</header>\n"
+                     << "<main class=\"wrap\">\n"
                      << "<h1>回显结果</h1>\n"
+                     << "<p class=\"lead\">服务器把你填的字原样拼了回来 —— 并且已经转义。</p>\n"
+                     << "<div class=\"form\">\n"
                      << "<p>名字：" << html_escape(form["name"]) << "</p>\n"
                      << "<p>留言：" << html_escape(form["msg"]) << "</p>\n"
-                     << "<p><a href=\"/echo\">再来一次</a></p>\n"
+                     << "</div>\n"
+                     << "<p class=\"note\"><a href=\"/echo\">再来一次</a></p>\n"
+                     << "</main>\n"
+                     << "<footer class=\"foot\">二期 C++ 自研服务端 · 正在学 socket 与 HTTP</footer>\n"
                      << "</body></html>\n";
-                send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
             }
             else
             {
@@ -330,7 +349,7 @@ int main()
         }
         else
         {
-            target = urldecode(target,false);
+            target = urldecode(target, false);
             string road = "www" + target;
 
             char root_buf[PATH_MAX];

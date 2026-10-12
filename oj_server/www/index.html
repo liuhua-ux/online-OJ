@@ -1,14 +1,40 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<link rel="stylesheet" href="/style.css">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>自研 OJ</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f6fed'/></svg>">
+<link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<h1>Hello, OJ</h1>
-<p>这是二期 C++ 自研服务端</p>
-<p><a href="/about.html">关于</a></p>
-<p><a href="/echo">回显测试</a></p>
+<header class="nav">
+  <a class="brand" href="/">自研 OJ</a>
+  <nav>
+    <a href="/">首页</a>
+    <a href="/about.html">关于</a>
+    <a href="/echo">回显测试</a>
+  </nav>
+</header>
+<main class="wrap">
+  <h1>Hello, OJ</h1>
+  <p class="lead">二期 C++ 自研服务端 —— socket · HTTP · 静态文件 · 表单回显</p>
+  <div class="cards">
+    <a class="card" href="/about.html">
+      <h2>关于</h2>
+      <p>这个项目在做什么、用什么做的</p>
+    </a>
+    <a class="card" href="/echo">
+      <h2>回显测试</h2>
+      <p>填一段字，服务器原样回给你</p>
+    </a>
+    <a class="card" href="/hello.html">
+      <h2>Hello</h2>
+      <p>你没为它写过一行 C++</p>
+    </a>
+  </div>
+  <p class="note">整站由 <code>oj_server/server.cpp</code> 直接吐出 —— 没有 Flask，没有 nginx。</p>
+</main>
+<footer class="foot">二期 C++ 自研服务端 · 正在学 socket 与 HTTP</footer>
 </body>
 </html>
