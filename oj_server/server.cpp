@@ -337,6 +337,7 @@ int main()
                      << "</main>\n"
                      << "<footer class=\"foot\">二期 C++ 自研服务端 · 正在学 socket 与 HTTP</footer>\n"
                      << "</body></html>\n";
+                send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
             }
             else
             {
