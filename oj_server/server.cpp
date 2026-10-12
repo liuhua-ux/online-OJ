@@ -62,12 +62,12 @@ int hexval(char c)
     }
 }
 
-string urldecode(const string &s)
+string urldecode(const string &s, bool plus_is_space = true)
 {
     string out;
     for (size_t i = 0; i < s.size(); i++)
     {
-        if (s[i] == '+')
+        if (plus_is_space == true && s[i] == '+')
         {
             out += ' ';
         }
@@ -330,7 +330,7 @@ int main()
         }
         else
         {
-            target = urldecode(target);
+            target = urldecode(target,false);
             string road = "www" + target;
 
             char root_buf[PATH_MAX];
