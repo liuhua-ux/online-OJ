@@ -104,6 +104,35 @@ map<string, string> parse_form(const string &body)
     return form;
 }
 
+string html_escape(const string &page)
+{
+    string out;
+    for(size_t i = 0;i<page.size();i++)
+    {
+        if(page[i]=='&')
+        {
+            out += "&amp;";
+        }
+        else if(page[i]=='<')
+        {
+            out += "&lt;";
+        }
+        else if(page[i]=='>')
+        {
+            out += "&gt;";
+        }
+        else if(page[i]=='"')
+        {
+            out += "&quot;";
+        }
+        else 
+        {
+            out += page[i];
+        }
+    }
+    return out;
+}
+
 int main()
 {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -152,6 +181,12 @@ int main()
             perror("accept");
             continue;
         }
+
+        // 暂时处理堵死
+        struct timeval tv;
+        tv.tv_sec = 5;
+        tv.tv_usec = 0;
+        setsockopt(conn_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         char buf[4096];
         string req;
@@ -268,6 +303,30 @@ int main()
             ss << f.rdbuf();
             string home = ss.str();
             send_response(conn_fd, 200, home, "text/html; charset=utf-8");
+        }
+        else if (target == "/echo")
+        {
+            if (method == "POST")
+            {
+                stringstream page;
+                page << "<!DOCTYPE html>\n"
+                     << "<html><head><meta charset=\"utf-8\"><title>回显</title></head>\n"
+                     << "<body>\n"
+                     << "<h1>回显结果</h1>\n"
+                     << "<p>名字：" << html_escape(form["name"]) << "</p>\n"
+                     << "<p>留言：" << html_escape(form["msg"]) << "</p>\n"
+                     << "<p><a href=\"/echo\">再来一次</a></p>\n"
+                     << "</body></html>\n";
+                send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
+            }
+            else
+            {
+                ifstream f("www/echo.html");
+                stringstream ss;
+                ss << f.rdbuf();
+                string echo = ss.str();
+                send_response(conn_fd, 200, echo, "text/html; charset=utf-8");
+            }
         }
         else
         {
