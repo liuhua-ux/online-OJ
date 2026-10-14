@@ -12,6 +12,7 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <stdexcept>
 
 using namespace std;
 
@@ -48,6 +49,7 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
                   content_type + "\r\n"
                                  "Content-Length: " +
                   to_string(body.size()) + "\r\n"
+                                           "Connection: close\r\n"
                                            "\r\n" +
                   body;
 
@@ -143,6 +145,34 @@ string html_escape(const string &page)
         }
     }
     return out;
+}
+
+size_t request_total_len(const string &req)
+{
+    size_t head_end = req.find("\r\n\r\n");
+    if (head_end == string::npos)
+        return string::npos; 
+
+    size_t total = head_end + 4; 
+
+    size_t pos = req.find("Content-Length:");
+    if (pos != string::npos && pos < head_end) 
+    {
+        size_t start = pos + string("Content-Length:").size();
+        size_t end = req.find("\r\n", start);
+
+        if (end != string::npos && end > start) 
+        {
+            try
+            {
+                total += stoi(req.substr(start, end - start));
+            }
+            catch (const exception &)
+            {
+            }
+        }
+    }
+    return total;
 }
 
 void handle_request(int conn_fd, const string &req)
@@ -402,6 +432,16 @@ int main()
                 {
                     conn_bufs[fd].append(buf, cnt);
                     cout << "fd " << fd << " 收到 " << cnt << " 字节，累积 " << conn_bufs[fd].size() << " 字节" << endl;
+
+                    size_t need = request_total_len(conn_bufs[fd]);
+                    if (need != string::npos && conn_bufs[fd].size() >= need)
+                    {
+                        string  req = conn_bufs[fd];
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                        conn_bufs.erase(fd);
+                        handle_request(fd, req);
+                        close(fd);
+                    }
                 }
                 else if (cnt == 0)
                 {
@@ -412,7 +452,7 @@ int main()
                 }
                 else
                 {
-                    if(errno != EAGAIN && errno != EWOULDBLOCK)
+                    if (errno != EAGAIN && errno != EWOULDBLOCK)
                     {
                         perror("read");
                     }
@@ -421,4 +461,4 @@ int main()
         }
     }
     return 0;
-} 
+}
