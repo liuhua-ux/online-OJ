@@ -13,15 +13,30 @@
 #include <fcntl.h>
 #include <cerrno>
 #include <stdexcept>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
+#include <queue>
 
 using namespace std;
 
-const map<string, string> content_types = {
-    {"html", "text/html; charset=utf-8"},
-    {"css", "text/css; charset=utf-8"},
-    {"js", "application/javascript; charset=utf-8"},
-    {"png", "image/png"},
-    {"", "application/octet-stream"},
+struct Task
+{
+    int conn_fd;
+    string req;
+};
+
+queue<Task> task_queue;
+mutex mtx;
+condition_variable cv;
+
+const map<string, string>
+    content_types = {
+        {"html", "text/html; charset=utf-8"},
+        {"css", "text/css; charset=utf-8"},
+        {"js", "application/javascript; charset=utf-8"},
+        {"png", "image/png"},
+        {"", "application/octet-stream"},
 };
 
 void send_response(int conn_fd, int code, const string &body, const string &content_type = "text/plain; charset=utf-8")
@@ -151,17 +166,17 @@ size_t request_total_len(const string &req)
 {
     size_t head_end = req.find("\r\n\r\n");
     if (head_end == string::npos)
-        return string::npos; 
+        return string::npos;
 
-    size_t total = head_end + 4; 
+    size_t total = head_end + 4;
 
     size_t pos = req.find("Content-Length:");
-    if (pos != string::npos && pos < head_end) 
+    if (pos != string::npos && pos < head_end)
     {
         size_t start = pos + string("Content-Length:").size();
         size_t end = req.find("\r\n", start);
 
-        if (end != string::npos && end > start) 
+        if (end != string::npos && end > start)
         {
             try
             {
@@ -352,6 +367,23 @@ void handle_request(int conn_fd, const string &req)
     }
 }
 
+void worker()
+{
+    Task t;
+    while (true)
+    {
+        {
+            unique_lock<mutex> lock(mtx);
+            cv.wait(lock, []
+                    { return !task_queue.empty(); });
+            t = task_queue.front();
+            task_queue.pop();
+        }
+        handle_request(t.conn_fd, t.req);
+        close(t.conn_fd);
+    }
+}
+
 int main()
 {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -396,6 +428,9 @@ int main()
 
     epoll_event events[64];
     map<int, string> conn_bufs;
+
+    thread t1(worker), t2(worker), t3(worker), t4(worker);
+
     while (true)
     {
         int n = epoll_wait(epfd, events, 64, -1);
@@ -436,11 +471,14 @@ int main()
                     size_t need = request_total_len(conn_bufs[fd]);
                     if (need != string::npos && conn_bufs[fd].size() >= need)
                     {
-                        string  req = conn_bufs[fd];
+                        string req = conn_bufs[fd];
                         epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                         conn_bufs.erase(fd);
-                        handle_request(fd, req);
-                        close(fd);
+                        {
+                            lock_guard<mutex> lock(mtx);
+                            task_queue.push({fd, req});
+                        }
+                        cv.notify_one();
                     }
                 }
                 else if (cnt == 0)
