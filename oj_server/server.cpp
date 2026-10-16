@@ -17,6 +17,8 @@
 #include <thread>
 #include <condition_variable>
 #include <queue>
+#include <mysql/mysql.h>
+#include "db_config.h"
 
 using namespace std;
 
@@ -190,6 +192,63 @@ size_t request_total_len(const string &req)
     return total;
 }
 
+MYSQL *get_conn()
+{
+    thread_local MYSQL *conn = nullptr;
+
+    if (conn == nullptr)
+    {
+        conn = mysql_init(nullptr);
+        if (conn == nullptr)
+        {
+            return nullptr;
+        }
+        if (mysql_real_connect(conn, DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT, NULL, 0) == NULL)
+        {
+            mysql_close(conn);
+            conn = nullptr;
+            return nullptr;
+        }
+    }
+    return conn;
+}
+
+string render_problems()
+{
+    stringstream page;
+
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return "<p>数据库暂时不可用</p>";
+    }
+    if (mysql_query(conn, "SELECT problem_id, title FROM problems WHERE is_deleted = 0 AND is_published = 1") != 0)
+    {
+        string err = mysql_error(conn);
+        return "<p>查询失败：" + err + "</p>";
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == NULL)
+    {
+        return "<p>取结果失败</p>";
+    }
+
+    page << "<h1>题库</h1>\n<ul>\n";
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res)) != NULL)
+    {
+        page << "<li>" << row[0] << " " << html_escape(row[1]) << "</li>\n"; // ← 页面长相随意，这段随便改
+    }
+
+    page << "</ul>\n";
+
+    mysql_free_result(res);
+
+    return page.str();
+}
+
 void handle_request(int conn_fd, const string &req)
 {
     size_t head_end = req.find("\r\n\r\n");
@@ -313,6 +372,10 @@ void handle_request(int conn_fd, const string &req)
             send_response(conn_fd, 200, echo, "text/html; charset=utf-8");
         }
     }
+    else if (target == "/problems")
+    {
+        send_response(conn_fd, 200, render_problems(), "text/html; charset=utf-8");
+    }
     else
     {
         target = urldecode(target, false);
@@ -369,6 +432,7 @@ void handle_request(int conn_fd, const string &req)
 
 void worker()
 {
+    get_conn();
     Task t;
     while (true)
     {

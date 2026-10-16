@@ -36,3 +36,4 @@ __pycache__/
 
 # 数据库配置（含密码，绝不提交）
 web/db_config.py
+oj_server/db_config.h
