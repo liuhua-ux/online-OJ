@@ -34,6 +34,7 @@ mutex mtx;
 condition_variable cv;
 
 const char *JUDGE_BIN = "/home/ubuntu/online-OJ/judge_demo/judge";
+const string PROBLEM_PREFIX = "/problem/";
 
 const map<string, string>
     content_types = {
@@ -307,7 +308,7 @@ string render_problems()
     MYSQL_ROW row;
     while ((row = mysql_fetch_row(res)) != NULL)
     {
-        page << "<li>" << row[0] << " " << html_escape(row[1]) << "</li>\n"; // ← 页面长相随意，这段随便改
+        page << "<li>" << row[0] << " " << html_escape(row[1]) << "</li>\n";
     }
 
     page << "</ul>\n";
@@ -315,6 +316,42 @@ string render_problems()
     mysql_free_result(res);
 
     return page.str();
+}
+
+bool render_problem(int problem_id, string &html)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string sql = "SELECT title FROM problems WHERE problem_id = " + to_string(problem_id) +
+                 " AND is_deleted = 0 AND is_published = 1";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "query failed: " << mysql_error(conn) << endl; 
+        return false;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == NULL)
+    {
+        return false;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    if (row == NULL)
+    {
+        mysql_free_result(res);
+        return false;
+    }
+
+    html = "<h1>" + html_escape(row[0]) + "</h1>\n";
+
+    mysql_free_result(res);
+    return true;
 }
 
 void handle_request(int conn_fd, const string &req)
@@ -439,6 +476,26 @@ void handle_request(int conn_fd, const string &req)
             string echo = ss.str();
             send_response(conn_fd, 200, echo, "text/html; charset=utf-8");
         }
+    }
+    else if (target.compare(0, PROBLEM_PREFIX.size(), PROBLEM_PREFIX) == 0)
+    {
+        string num = target.substr(PROBLEM_PREFIX.size()); 
+        string html;
+        if (!num.empty() && num.find_first_not_of("0123456789") == string::npos)
+        {
+            try
+            {
+                if (render_problem(stoi(num), html))
+                {
+                    send_response(conn_fd, 200, html, "text/html; charset=utf-8");
+                    return;
+                }
+            }
+            catch (const exception &)      
+            {
+            }
+        }
+        send_response(conn_fd, 404, "请输入正确的网址\n");
     }
     else if (target == "/problems")
     {
