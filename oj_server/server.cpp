@@ -19,6 +19,7 @@
 #include <queue>
 #include <mysql/mysql.h>
 #include "db_config.h"
+#include <sys/wait.h>
 
 using namespace std;
 
@@ -31,6 +32,8 @@ struct Task
 queue<Task> task_queue;
 mutex mtx;
 condition_variable cv;
+
+const char *JUDGE_BIN = "/home/ubuntu/online-OJ/judge_demo/judge";
 
 const map<string, string>
     content_types = {
@@ -190,6 +193,71 @@ size_t request_total_len(const string &req)
         }
     }
     return total;
+}
+
+bool run_judge(const string &src_path, const string &data_dir, int tl_ms, int ml_mb, string &out)
+{
+    const int CHILD_NOT_STARTED = 127;
+
+    size_t slash = src_path.rfind('/');
+    string work_dir = src_path.substr(0, slash);
+
+    int fd[2];
+    if (pipe(fd) == -1)
+    {
+        cerr << "pipe failed: " << strerror(errno) << endl;
+        return false;
+    }
+
+    pid_t pid = fork();
+    if (pid == -1)
+    {
+        cerr << "fork failed: " << strerror(errno) << endl;
+        close(fd[0]);
+        close(fd[1]);
+        return false;
+    }
+
+    if (pid == 0)
+    {
+        close(fd[0]);
+        dup2(fd[1], 1);
+        close(fd[1]);
+
+        if (chdir(work_dir.c_str()) == -1)
+        {
+            _exit(CHILD_NOT_STARTED);
+        }
+
+        execl(JUDGE_BIN,
+              "judge",
+              src_path.c_str(),
+              data_dir.c_str(),
+              to_string(tl_ms).c_str(),
+              to_string(ml_mb).c_str(),
+              (char *)NULL);
+
+        _exit(CHILD_NOT_STARTED);
+    }
+
+    close(fd[1]);
+    out.clear();
+    char buf[256];
+    ssize_t n;
+    while ((n = read(fd[0], buf, sizeof(buf))) > 0)
+    {
+        out.append(buf, n);
+    }
+    close(fd[0]);
+
+    int status;
+    if (waitpid(pid, &status, 0) == -1)
+    {
+        cerr << "waitpid failed: " << strerror(errno) << endl;
+        return false;
+    }
+
+    return WIFEXITED(status) && WEXITSTATUS(status) != CHILD_NOT_STARTED;
 }
 
 MYSQL *get_conn()

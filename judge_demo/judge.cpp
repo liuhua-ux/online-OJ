@@ -161,7 +161,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    int tl_ms = (argc > 3) ? atoi(argv[3]) : 2000;   // 缺省值保持老行为
+    int tl_ms = (argc > 3) ? atoi(argv[3]) : 2000;   
     int ml_mb = (argc > 4) ? atoi(argv[4]) : 256;
 
     if (!compile(argv[1]))
