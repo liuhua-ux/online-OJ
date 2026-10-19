@@ -35,6 +35,7 @@ condition_variable cv;
 
 const char *JUDGE_BIN = "/home/ubuntu/online-OJ/judge_demo/judge";
 const string PROBLEM_PREFIX = "/problem/";
+const string SUBMIT_PREFIX = "/submit/";
 
 const map<string, string>
     content_types = {
@@ -51,6 +52,10 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
     if (code == 200)
     {
         reason = "OK";
+    }
+    else if (code == 400)
+    {
+        reason = "Bad Request";
     }
     else if (code == 404)
     {
@@ -425,6 +430,44 @@ bool render_problem(int problem_id, string &html)
     return true;
 }
 
+// 入队时就要拿到这道题的时限/内存 —— 学生详情页看到的是哪组值，就按哪组判。
+bool get_problem_limits(int problem_id, int &tl_ms, int &ml_mb)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string sql = "SELECT time_limit_ms, memory_limit_mb FROM problems WHERE problem_id = " +
+                 to_string(problem_id) + " AND is_deleted = 0 AND is_published = 1";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "query failed: " << mysql_error(conn) << endl;
+        return false;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == NULL)
+    {
+        return false;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    if (row == NULL)
+    {
+        mysql_free_result(res);
+        return false;
+    }
+
+    tl_ms = stoi(row[0]);
+    ml_mb = stoi(row[1]);
+
+    mysql_free_result(res);
+    return true;
+}
+
 void handle_request(int conn_fd, const string &req)
 {
     size_t head_end = req.find("\r\n\r\n");
@@ -548,6 +591,47 @@ void handle_request(int conn_fd, const string &req)
             }
         }
         send_response(conn_fd, 404, "请输入正确的网址\n");
+    }
+    else if (method == "POST" && target.compare(0, SUBMIT_PREFIX.size(), SUBMIT_PREFIX) == 0)
+    {
+        string num = target.substr(SUBMIT_PREFIX.size());
+        int problem_id = 0;
+        bool ok_id = !num.empty() && num.find_first_not_of("0123456789") == string::npos;
+
+        if (ok_id)
+        {
+            try
+            {
+                problem_id = stoi(num);
+            }
+            catch (const exception &)
+            {
+                ok_id = false;
+            }
+        }
+
+        int tl_ms = 0, ml_mb = 0;
+        if (!ok_id || !get_problem_limits(problem_id, tl_ms, ml_mb))
+        {
+            send_response(conn_fd, 404, "没有这道题\n");
+            return;
+        }
+
+        string code;
+        if (form.count("code"))
+        {
+            code = form["code"];
+        }
+
+        if (code.find_first_not_of(" \t\r\n") == string::npos)
+        {
+            send_response(conn_fd, 400, "代码不能为空\n");
+            return;
+        }
+
+        string msg = "收到：" + to_string(code.size()) + " 字节，题号 " + to_string(problem_id) +
+                     "，时限 " + to_string(tl_ms) + " ms，内存 " + to_string(ml_mb) + " MB\n";
+        send_response(conn_fd, 200, msg);
     }
     else if (target == "/problems")
     {
