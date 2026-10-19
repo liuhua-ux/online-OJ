@@ -168,6 +168,52 @@ string html_escape(const string &page)
     return out;
 }
 
+// 页面骨架：doctype + head + 顶栏 + <main> 开头。
+// 动态页面一律用它，别再手抄导航栏（那件事已经在 5 个静态页里各有一份了）。
+string page_head(const string &title)
+{
+    return "<!DOCTYPE html>\n"
+           "<html lang=\"zh-CN\">\n"
+           "<head>\n"
+           "<meta charset=\"utf-8\">\n"
+           "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+           "<title>" + html_escape(title) + " · 自研 OJ</title>\n"
+           "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f6fed'/></svg>\">\n"
+           "<link rel=\"stylesheet\" href=\"/style.css\">\n"
+           "</head>\n"
+           "<body>\n"
+           "<header class=\"nav\">\n"
+           "  <a class=\"brand\" href=\"/\">自研 OJ</a>\n"
+           "  <nav>\n"
+           "    <a href=\"/\">首页</a>\n"
+           "    <a href=\"/about.html\">关于</a>\n"
+           "    <a href=\"/problems\">题库</a>\n"
+           "    <a href=\"/echo\">回显测试</a>\n"
+           "  </nav>\n"
+           "</header>\n"
+           "<main class=\"wrap\">\n";
+}
+
+// 页面骨架的收尾：关 <main>、页脚、关文档。
+string page_tail()
+{
+    return "</main>\n"
+           "<footer class=\"foot\">二期 C++ 自研服务端 · 正在学 socket 与 HTTP</footer>\n"
+           "</body>\n"
+           "</html>\n";
+}
+
+// 题目页下半部分的提交框。action 指向子步 3 要做的 POST /submit/<题号>。
+string render_submit_form(int problem_id)
+{
+    return "<h2 class=\"sec\">提交代码</h2>\n"
+           "<form class=\"form\" method=\"POST\" action=\"/submit/" +
+           to_string(problem_id) + "\">\n"
+                                   "  <textarea name=\"code\" rows=\"14\" spellcheck=\"false\" placeholder=\"在这里粘贴你的 C++ 代码\"></textarea>\n"
+                                   "  <button type=\"submit\">提交</button>\n"
+                                   "</form>\n";
+}
+
 size_t request_total_len(const string &req)
 {
     size_t head_end = req.find("\r\n\r\n");
@@ -438,24 +484,7 @@ void handle_request(int conn_fd, const string &req)
         if (method == "POST")
         {
             stringstream page;
-            page << "<!DOCTYPE html>\n"
-                 << "<html lang=\"zh-CN\">\n"
-                 << "<head>\n"
-                 << "<meta charset=\"utf-8\">\n"
-                 << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-                 << "<title>回显结果 · 自研 OJ</title>\n"
-                 << "<link rel=\"stylesheet\" href=\"/style.css\">\n"
-                 << "</head>\n"
-                 << "<body>\n"
-                 << "<header class=\"nav\">\n"
-                 << "<a class=\"brand\" href=\"/\">自研 OJ</a>\n"
-                 << "<nav>\n"
-                 << "<a href=\"/\">首页</a>\n"
-                 << "<a href=\"/about.html\">关于</a>\n"
-                 << "<a href=\"/echo\">回显测试</a>\n"
-                 << "</nav>\n"
-                 << "</header>\n"
-                 << "<main class=\"wrap\">\n"
+            page << page_head("回显结果")
                  << "<h1>回显结果</h1>\n"
                  << "<p class=\"lead\">服务器把你填的字原样拼了回来 —— 并且已经转义。</p>\n"
                  << "<div class=\"form\">\n"
@@ -463,9 +492,7 @@ void handle_request(int conn_fd, const string &req)
                  << "<p>留言：" << html_escape(form["msg"]) << "</p>\n"
                  << "</div>\n"
                  << "<p class=\"note\"><a href=\"/echo\">再来一次</a></p>\n"
-                 << "</main>\n"
-                 << "<footer class=\"foot\">二期 C++ 自研服务端 · 正在学 socket 与 HTTP</footer>\n"
-                 << "</body></html>\n";
+                 << page_tail();
             send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
         }
         else
