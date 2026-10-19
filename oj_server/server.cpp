@@ -30,9 +30,22 @@ struct Task
     string req;
 };
 
+struct JudgeTask
+{
+    string job_id;     
+    string work_dir;   
+    int problem_id;    
+    int tl_ms;          
+    int ml_mb;          
+};
+
 queue<Task> task_queue;
 mutex mtx;
 condition_variable cv;
+
+queue<JudgeTask> judge_queue;
+mutex judge_mtx;
+condition_variable judge_cv;
 
 const char *JUDGE_BIN = "/home/ubuntu/online-OJ/judge_demo/judge";
 const string PROBLEM_PREFIX = "/problem/";
@@ -718,6 +731,13 @@ void handle_request(int conn_fd, const string &req)
             return;
         }
 
+        {
+            lock_guard<mutex> lock(judge_mtx);
+            judge_queue.push({job_id, work_dir, problem_id, tl_ms, ml_mb});
+        }
+        judge_cv.notify_one();
+
+        cout << "入队 job_id=" << job_id << " problem=" << problem_id << endl;
         send_redirect(conn_fd, "/result/" + job_id);
     }
     else if (target == "/problems")
