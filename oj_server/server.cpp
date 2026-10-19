@@ -194,21 +194,22 @@ string page_head(const string &title)
            "<head>\n"
            "<meta charset=\"utf-8\">\n"
            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-           "<title>" + html_escape(title) + " · 自研 OJ</title>\n"
-           "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231d4ed8'/></svg>\">\n"
-           "<link rel=\"stylesheet\" href=\"/style.css\">\n"
-           "</head>\n"
-           "<body>\n"
-           "<header class=\"nav\">\n"
-           "  <a class=\"brand\" href=\"/\"><span class=\"brand-mark\" aria-hidden=\"true\">{ }</span>自研 OJ</a>\n"
-           "  <nav>\n"
-           "    <a href=\"/\">首页</a>\n"
-           "    <a href=\"/problems\">题库</a>\n"
-           "    <a href=\"/about.html\">关于</a>\n"
-           "    <a href=\"/echo\">回显测试</a>\n"
-           "  </nav>\n"
-           "</header>\n"
-           "<main class=\"wrap\">\n";
+           "<title>" +
+           html_escape(title) + " · 自研 OJ</title>\n"
+                                "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231d4ed8'/></svg>\">\n"
+                                "<link rel=\"stylesheet\" href=\"/style.css\">\n"
+                                "</head>\n"
+                                "<body>\n"
+                                "<header class=\"nav\">\n"
+                                "  <a class=\"brand\" href=\"/\"><span class=\"brand-mark\" aria-hidden=\"true\">{ }</span>自研 OJ</a>\n"
+                                "  <nav>\n"
+                                "    <a href=\"/\">首页</a>\n"
+                                "    <a href=\"/problems\">题库</a>\n"
+                                "    <a href=\"/about.html\">关于</a>\n"
+                                "    <a href=\"/echo\">回显测试</a>\n"
+                                "  </nav>\n"
+                                "</header>\n"
+                                "<main class=\"wrap\">\n";
 }
 
 string page_tail()
@@ -437,7 +438,8 @@ bool render_problem(int problem_id, string &html)
     page << "<header class=\"problem-header\">\n";
     page << "<h1>" << html_escape(row[0]) << "</h1>\n";
     page << "<div class=\"chips\"><span class=\"chip\">时间 " << row[6] << " ms</span>"
-            "<span class=\"chip\">内存 " << row[7] << " MB</span></div>\n";
+                                                                           "<span class=\"chip\">内存 "
+         << row[7] << " MB</span></div>\n";
     page << "</header>\n";
 
     page << "<div class=\"article\">\n";
@@ -663,9 +665,30 @@ void handle_request(int conn_fd, const string &req)
             return;
         }
 
+        char tmpl[] = "/tmp/oj_XXXXXX";
+        char *dir = mkdtemp(tmpl);
+        if (dir == nullptr)
+        {
+            send_response(conn_fd, 500, "服务器开不了临时目录\n");
+            return;
+        }
+        string work_dir = dir;
+
+        string src_path = work_dir + "/submission.cpp";
+
+        ofstream f(src_path);
+        f << code;
+        f.close();
+        if (f.fail())
+        {
+            send_response(conn_fd, 500, "代码保存失败\n");
+            return;
+        }
+
         string job_id = make_job_id();
         string msg = "收到:" + to_string(code.size()) + " 字节，题号 " +
-                     to_string(problem_id) + ",job_id=" + job_id + "\n";
+                     to_string(problem_id) + ",job_id=" + job_id +
+                     ",work_dir=" + work_dir + "\n";
         send_response(conn_fd, 200, msg);
     }
     else if (target == "/problems")
