@@ -83,6 +83,17 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
     write(conn_fd, resp.c_str(), resp.size());
 }
 
+void send_redirect(int conn_fd, const string &location)
+{
+    string resp = "HTTP/1.1 302 Found\r\n"
+                  "Location: " +
+                  location + "\r\n"
+                             "Content-Length: 0\r\n"
+                             "Connection: close\r\n"
+                             "\r\n";
+    write(conn_fd, resp.c_str(), resp.size());
+}
+
 string make_job_id()
 {
     static const char *hex = "0123456789abcdef";
@@ -686,10 +697,28 @@ void handle_request(int conn_fd, const string &req)
         }
 
         string job_id = make_job_id();
-        string msg = "收到:" + to_string(code.size()) + " 字节，题号 " +
-                     to_string(problem_id) + ",job_id=" + job_id +
-                     ",work_dir=" + work_dir + "\n";
-        send_response(conn_fd, 200, msg);
+
+        MYSQL *conn = get_conn();
+        if (conn == nullptr)
+        {
+            send_response(conn_fd, 500, "数据库暂时不可用\n");
+            return;
+        }
+
+        string sql = "INSERT INTO submissions "
+                     "(job_id, username, problem_id, status, result, created_at) "
+                     "VALUES ('" +
+                     job_id + "', NULL, " + to_string(problem_id) +
+                     ", '排队中', NULL, NOW())";
+
+        if (mysql_query(conn, sql.c_str()) != 0)
+        {
+            cerr << "insert failed: " << mysql_error(conn) << endl;
+            send_response(conn_fd, 500, "提交记录保存失败\n");
+            return;
+        }
+
+        send_redirect(conn_fd, "/result/" + job_id);
     }
     else if (target == "/problems")
     {
