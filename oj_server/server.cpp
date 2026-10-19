@@ -20,6 +20,7 @@
 #include <mysql/mysql.h>
 #include "db_config.h"
 #include <sys/wait.h>
+#include <random>
 
 using namespace std;
 
@@ -80,6 +81,19 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
                   body;
 
     write(conn_fd, resp.c_str(), resp.size());
+}
+
+string make_job_id()
+{
+    static const char *hex = "0123456789abcdef";
+    thread_local random_device rd;
+
+    string id;
+    for (int i = 0; i < 8; i++)
+    {
+        id += hex[rd() % 16];
+    }
+    return id;
 }
 
 int hexval(char c)
@@ -173,8 +187,6 @@ string html_escape(const string &page)
     return out;
 }
 
-// 页面骨架：doctype + head + 顶栏 + <main> 开头。
-// 动态页面一律用它，别再手抄导航栏（那件事已经在 5 个静态页里各有一份了）。
 string page_head(const string &title)
 {
     return "<!DOCTYPE html>\n"
@@ -182,24 +194,24 @@ string page_head(const string &title)
            "<head>\n"
            "<meta charset=\"utf-8\">\n"
            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-           "<title>" + html_escape(title) + " · 自研 OJ</title>\n"
-           "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f6fed'/></svg>\">\n"
-           "<link rel=\"stylesheet\" href=\"/style.css\">\n"
-           "</head>\n"
-           "<body>\n"
-           "<header class=\"nav\">\n"
-           "  <a class=\"brand\" href=\"/\">自研 OJ</a>\n"
-           "  <nav>\n"
-           "    <a href=\"/\">首页</a>\n"
-           "    <a href=\"/about.html\">关于</a>\n"
-           "    <a href=\"/problems\">题库</a>\n"
-           "    <a href=\"/echo\">回显测试</a>\n"
-           "  </nav>\n"
-           "</header>\n"
-           "<main class=\"wrap\">\n";
+           "<title>" +
+           html_escape(title) + " · 自研 OJ</title>\n"
+                                "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f6fed'/></svg>\">\n"
+                                "<link rel=\"stylesheet\" href=\"/style.css\">\n"
+                                "</head>\n"
+                                "<body>\n"
+                                "<header class=\"nav\">\n"
+                                "  <a class=\"brand\" href=\"/\">自研 OJ</a>\n"
+                                "  <nav>\n"
+                                "    <a href=\"/\">首页</a>\n"
+                                "    <a href=\"/about.html\">关于</a>\n"
+                                "    <a href=\"/problems\">题库</a>\n"
+                                "    <a href=\"/echo\">回显测试</a>\n"
+                                "  </nav>\n"
+                                "</header>\n"
+                                "<main class=\"wrap\">\n";
 }
 
-// 页面骨架的收尾：关 <main>、页脚、关文档。
 string page_tail()
 {
     return "</main>\n"
@@ -208,7 +220,6 @@ string page_tail()
            "</html>\n";
 }
 
-// 题目页下半部分的提交框。action 指向子步 3 要做的 POST /submit/<题号>。
 string render_submit_form(int problem_id)
 {
     return "<h2 class=\"sec\">提交代码</h2>\n"
@@ -379,12 +390,13 @@ bool render_problem(int problem_id, string &html)
 
     string sql = "SELECT title, description, input_format, output_format, "
                  "sample_input, sample_output, time_limit_ms, memory_limit_mb "
-                 "FROM problems WHERE problem_id = " + to_string(problem_id) +
+                 "FROM problems WHERE problem_id = " +
+                 to_string(problem_id) +
                  " AND is_deleted = 0 AND is_published = 1";
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "query failed: " << mysql_error(conn) << endl; 
+        cerr << "query failed: " << mysql_error(conn) << endl;
         return false;
     }
 
@@ -430,7 +442,6 @@ bool render_problem(int problem_id, string &html)
     return true;
 }
 
-// 入队时就要拿到这道题的时限/内存 —— 学生详情页看到的是哪组值，就按哪组判。
 bool get_problem_limits(int problem_id, int &tl_ms, int &ml_mb)
 {
     MYSQL *conn = get_conn();
@@ -574,7 +585,7 @@ void handle_request(int conn_fd, const string &req)
     }
     else if (target.compare(0, PROBLEM_PREFIX.size(), PROBLEM_PREFIX) == 0)
     {
-        string num = target.substr(PROBLEM_PREFIX.size()); 
+        string num = target.substr(PROBLEM_PREFIX.size());
         string html;
         if (!num.empty() && num.find_first_not_of("0123456789") == string::npos)
         {
@@ -586,7 +597,7 @@ void handle_request(int conn_fd, const string &req)
                     return;
                 }
             }
-            catch (const exception &)      
+            catch (const exception &)
             {
             }
         }
@@ -629,8 +640,9 @@ void handle_request(int conn_fd, const string &req)
             return;
         }
 
-        string msg = "收到：" + to_string(code.size()) + " 字节，题号 " + to_string(problem_id) +
-                     "，时限 " + to_string(tl_ms) + " ms，内存 " + to_string(ml_mb) + " MB\n";
+        string job_id = make_job_id();
+        string msg = "收到:" + to_string(code.size()) + " 字节，题号 " +
+                     to_string(problem_id) + ",job_id=" + job_id + "\n";
         send_response(conn_fd, 200, msg);
     }
     else if (target == "/problems")
