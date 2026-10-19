@@ -372,7 +372,9 @@ bool render_problem(int problem_id, string &html)
         return false;
     }
 
-    string sql = "SELECT title FROM problems WHERE problem_id = " + to_string(problem_id) +
+    string sql = "SELECT title, description, input_format, output_format, "
+                 "sample_input, sample_output, time_limit_ms, memory_limit_mb "
+                 "FROM problems WHERE problem_id = " + to_string(problem_id) +
                  " AND is_deleted = 0 AND is_published = 1";
 
     if (mysql_query(conn, sql.c_str()) != 0)
@@ -394,7 +396,30 @@ bool render_problem(int problem_id, string &html)
         return false;
     }
 
-    html = "<h1>" + html_escape(row[0]) + "</h1>\n";
+    stringstream page;
+    page << page_head(row[0]);
+    page << "<h1>" << html_escape(row[0]) << "</h1>\n";
+
+    page << "<div class=\"statement\">" << html_escape(row[1]) << "</div>\n";
+
+    page << "<h2>输入格式</h2>\n";
+    page << "<div class=\"statement\">" << html_escape(row[2]) << "</div>\n";
+
+    page << "<h2>输出格式</h2>\n";
+    page << "<div class=\"statement\">" << html_escape(row[3]) << "</div>\n";
+
+    page << "<h2>样例输入</h2>\n";
+    page << "<pre>" << html_escape(row[4]) << "</pre>\n";
+
+    page << "<h2>样例输出</h2>\n";
+    page << "<pre>" << html_escape(row[5]) << "</pre>\n";
+
+    page << "<p class=\"limits\">时间限制:" << row[6] << " ms  内存限制:" << row[7] << " MB</p>\n";
+
+    page << render_submit_form(problem_id);
+    page << page_tail();
+
+    html = page.str();
 
     mysql_free_result(res);
     return true;
