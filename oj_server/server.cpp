@@ -194,39 +194,42 @@ string page_head(const string &title)
            "<head>\n"
            "<meta charset=\"utf-8\">\n"
            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-           "<title>" +
-           html_escape(title) + " · 自研 OJ</title>\n"
-                                "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f6fed'/></svg>\">\n"
-                                "<link rel=\"stylesheet\" href=\"/style.css\">\n"
-                                "</head>\n"
-                                "<body>\n"
-                                "<header class=\"nav\">\n"
-                                "  <a class=\"brand\" href=\"/\">自研 OJ</a>\n"
-                                "  <nav>\n"
-                                "    <a href=\"/\">首页</a>\n"
-                                "    <a href=\"/about.html\">关于</a>\n"
-                                "    <a href=\"/problems\">题库</a>\n"
-                                "    <a href=\"/echo\">回显测试</a>\n"
-                                "  </nav>\n"
-                                "</header>\n"
-                                "<main class=\"wrap\">\n";
+           "<title>" + html_escape(title) + " · 自研 OJ</title>\n"
+           "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231d4ed8'/></svg>\">\n"
+           "<link rel=\"stylesheet\" href=\"/style.css\">\n"
+           "</head>\n"
+           "<body>\n"
+           "<header class=\"nav\">\n"
+           "  <a class=\"brand\" href=\"/\"><span class=\"brand-mark\" aria-hidden=\"true\">{ }</span>自研 OJ</a>\n"
+           "  <nav>\n"
+           "    <a href=\"/\">首页</a>\n"
+           "    <a href=\"/problems\">题库</a>\n"
+           "    <a href=\"/about.html\">关于</a>\n"
+           "    <a href=\"/echo\">回显测试</a>\n"
+           "  </nav>\n"
+           "</header>\n"
+           "<main class=\"wrap\">\n";
 }
 
 string page_tail()
 {
     return "</main>\n"
-           "<footer class=\"foot\">二期 C++ 自研服务端 · 正在学 socket 与 HTTP</footer>\n"
+           "<footer class=\"foot\">二期 C++ 自研服务端：socket、epoll、线程池</footer>\n"
            "</body>\n"
            "</html>\n";
 }
 
 string render_submit_form(int problem_id)
 {
-    return "<h2 class=\"sec\">提交代码</h2>\n"
-           "<form class=\"form\" method=\"POST\" action=\"/submit/" +
+    return "<h2>提交代码</h2>\n"
+           "<form class=\"editor\" method=\"POST\" action=\"/submit/" +
            to_string(problem_id) + "\">\n"
-                                   "  <textarea name=\"code\" rows=\"14\" spellcheck=\"false\" placeholder=\"在这里粘贴你的 C++ 代码\"></textarea>\n"
-                                   "  <button type=\"submit\">提交</button>\n"
+                                   "  <div class=\"editor-bar\"><span class=\"dot\" aria-hidden=\"true\"></span><span>submission.cpp</span><span class=\"lang\">C++17</span></div>\n"
+                                   "  <textarea name=\"code\" spellcheck=\"false\" placeholder=\"在这里粘贴你的 C++ 代码\"></textarea>\n"
+                                   "  <div class=\"editor-foot\">\n"
+                                   "    <button type=\"submit\">提交判题</button>\n"
+                                   "    <span class=\"hint\">提交后在后台编译、运行、比对</span>\n"
+                                   "  </div>\n"
                                    "</form>\n";
 }
 
@@ -346,37 +349,51 @@ MYSQL *get_conn()
 
 string render_problems()
 {
-    stringstream page;
-
     MYSQL *conn = get_conn();
     if (conn == nullptr)
     {
-        return "<p>数据库暂时不可用</p>";
+        return page_head("题库") + "<p class=\"empty\">数据库暂时不可用。</p>\n" + page_tail();
     }
-    if (mysql_query(conn, "SELECT problem_id, title FROM problems WHERE is_deleted = 0 AND is_published = 1") != 0)
+
+    if (mysql_query(conn, "SELECT problem_id, title, time_limit_ms, memory_limit_mb "
+                          "FROM problems WHERE is_deleted = 0 AND is_published = 1") != 0)
     {
-        string err = mysql_error(conn);
-        return "<p>查询失败：" + err + "</p>";
+        cerr << "query failed: " << mysql_error(conn) << endl;
+        return page_head("题库") + "<p class=\"empty\">题库暂时读不出来。</p>\n" + page_tail();
     }
 
     MYSQL_RES *res = mysql_store_result(conn);
     if (res == NULL)
     {
-        return "<p>取结果失败</p>";
+        return page_head("题库") + "<p class=\"empty\">题库暂时读不出来。</p>\n" + page_tail();
     }
 
-    page << "<h1>题库</h1>\n<ul>\n";
+    stringstream page;
+    page << page_head("题库");
+    page << "<header class=\"page-head\"><h1>题库</h1>"
+            "<p class=\"lead\">挑一道题，写完代码交上来。</p></header>\n";
+    page << "<div class=\"problem-list\">\n";
 
+    int count = 0;
     MYSQL_ROW row;
     while ((row = mysql_fetch_row(res)) != NULL)
     {
-        page << "<li>" << row[0] << " " << html_escape(row[1]) << "</li>\n";
+        page << "<a class=\"problem-row\" href=\"/problem/" << row[0] << "\">"
+             << "<span class=\"problem-id\">#" << row[0] << "</span>"
+             << "<span class=\"problem-title\">" << html_escape(row[1]) << "</span>"
+             << "<span class=\"problem-meta\">" << row[2] << " ms / " << row[3] << " MB</span>"
+             << "</a>\n";
+        count++;
     }
 
-    page << "</ul>\n";
+    page << "</div>\n";
+    if (count == 0)
+    {
+        page << "<p class=\"empty\">暂无已发布的题目。</p>\n";
+    }
+    page << page_tail();
 
     mysql_free_result(res);
-
     return page.str();
 }
 
@@ -415,8 +432,15 @@ bool render_problem(int problem_id, string &html)
 
     stringstream page;
     page << page_head(row[0]);
-    page << "<h1>" << html_escape(row[0]) << "</h1>\n";
+    page << "<p class=\"breadcrumb\"><a href=\"/problems\">题库</a> / 第 " << problem_id << " 题</p>\n";
 
+    page << "<header class=\"problem-header\">\n";
+    page << "<h1>" << html_escape(row[0]) << "</h1>\n";
+    page << "<div class=\"chips\"><span class=\"chip\">时间 " << row[6] << " ms</span>"
+            "<span class=\"chip\">内存 " << row[7] << " MB</span></div>\n";
+    page << "</header>\n";
+
+    page << "<div class=\"article\">\n";
     page << "<div class=\"statement\">" << html_escape(row[1]) << "</div>\n";
 
     page << "<h2>输入格式</h2>\n";
@@ -431,9 +455,8 @@ bool render_problem(int problem_id, string &html)
     page << "<h2>样例输出</h2>\n";
     page << "<pre>" << html_escape(row[5]) << "</pre>\n";
 
-    page << "<p class=\"limits\">时间限制:" << row[6] << " ms  内存限制:" << row[7] << " MB</p>\n";
-
     page << render_submit_form(problem_id);
+    page << "</div>\n";
     page << page_tail();
 
     html = page.str();
@@ -564,8 +587,8 @@ void handle_request(int conn_fd, const string &req)
         {
             stringstream page;
             page << page_head("回显结果")
-                 << "<h1>回显结果</h1>\n"
-                 << "<p class=\"lead\">服务器把你填的字原样拼了回来 —— 并且已经转义。</p>\n"
+                 << "<header class=\"page-head\"><h1>回显结果</h1>"
+                    "<p class=\"lead\">服务器把你填的字原样拼了回来 —— 并且已经转义。</p></header>\n"
                  << "<div class=\"form\">\n"
                  << "<p>名字：" << html_escape(form["name"]) << "</p>\n"
                  << "<p>留言：" << html_escape(form["msg"]) << "</p>\n"

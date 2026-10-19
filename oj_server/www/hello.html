@@ -4,25 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hello · 自研 OJ</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f6fed'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231d4ed8'/></svg>">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header class="nav">
-  <a class="brand" href="/">自研 OJ</a>
+  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">{ }</span>自研 OJ</a>
   <nav>
     <a href="/">首页</a>
-    <a href="/about.html">关于</a>
     <a href="/problems">题库</a>
+    <a href="/about.html">关于</a>
     <a href="/echo">回显测试</a>
   </nav>
 </header>
 <main class="wrap">
-  <h1>Hello 页</h1>
-  <p class="lead">这是 <code>www/hello.html</code> —— 你没有为它写过一行 C++。</p>
-  <p>它能被访问，只是因为路由只有一条规则：<code>/xxx</code> → <code>www/xxx</code>。所以<strong>加一个页面 = 往磁盘上放一个文件</strong>，不用碰代码、不用重编译。</p>
-  <p class="note">不信？改这个文件一个字，刷新立刻变。</p>
+  <header class="page-head">
+    <h1>Hello 页</h1>
+    <p class="lead">这是 <code>www/hello.html</code> —— 你没有为它写过一行 C++。</p>
+  </header>
+
+  <div class="prose">
+    <p>它能被访问，只是因为路由只有一条规则：<code>/xxx</code> → <code>www/xxx</code>。所以<strong>加一个页面 = 往磁盘上放一个文件</strong>，不用碰代码、不用重编译。</p>
+    <p class="note">不信？改这个文件一个字，刷新立刻变。</p>
+  </div>
 </main>
-<footer class="foot">二期 C++ 自研服务端 · 正在学 socket 与 HTTP</footer>
+<footer class="foot">二期 C++ 自研服务端：socket、epoll、线程池</footer>
 </body>
 </html>

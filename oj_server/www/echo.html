@@ -4,22 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>回显测试 · 自研 OJ</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f6fed'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231d4ed8'/></svg>">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header class="nav">
-  <a class="brand" href="/">自研 OJ</a>
+  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">{ }</span>自研 OJ</a>
   <nav>
     <a href="/">首页</a>
-    <a href="/about.html">关于</a>
     <a href="/problems">题库</a>
+    <a href="/about.html">关于</a>
     <a href="/echo">回显测试</a>
   </nav>
 </header>
 <main class="wrap">
-  <h1>回显测试</h1>
-  <p class="lead">填点东西提交，服务器会把它拼进下一页原样回给你。</p>
+  <header class="page-head">
+    <h1>回显测试</h1>
+    <p class="lead">填点东西提交，服务器会把它拼进下一页原样回给你。</p>
+  </header>
+
   <form class="form" method="POST" action="/echo">
     <label class="field">
       <span>名字</span>
@@ -31,11 +34,12 @@
     </label>
     <button type="submit">提交</button>
   </form>
+
   <p class="note">
     这个名字栏曾经是可以打穿别人的：填 <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> 会弹框。
     现在服务端做了 HTML 转义，它只会被当普通文字显示。
   </p>
 </main>
-<footer class="foot">二期 C++ 自研服务端 · 正在学 socket 与 HTTP</footer>
+<footer class="foot">二期 C++ 自研服务端：socket、epoll、线程池</footer>
 </body>
 </html>

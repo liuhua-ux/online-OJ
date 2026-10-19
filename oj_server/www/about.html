@@ -4,33 +4,42 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>关于 · 自研 OJ</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f6fed'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231d4ed8'/></svg>">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header class="nav">
-  <a class="brand" href="/">自研 OJ</a>
+  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">{ }</span>自研 OJ</a>
   <nav>
     <a href="/">首页</a>
-    <a href="/about.html">关于</a>
     <a href="/problems">题库</a>
+    <a href="/about.html">关于</a>
     <a href="/echo">回显测试</a>
   </nav>
 </header>
 <main class="wrap">
-  <h1>关于</h1>
-  <p class="lead">一个从零手写的 OJ（在线判题）系统。</p>
-  <p>一期用 Flask 把整条链路跑通：判题器 → 队列 → 落库 → 登录 → 题库 → 排行榜。二期把 Web 层换成 C++ 自研服务端 —— <strong>功能不变，只换实现</strong>。</p>
-  <h2 class="sec">二期已经做到的</h2>
-  <ul class="list">
-    <li>socket → bind → listen → accept 的完整生命周期</li>
-    <li>自己解析请求行 / 头部 / body，处理半包与粘包</li>
-    <li>静态文件服务 + 按后缀推 Content-Type</li>
-    <li>目录穿越防御（realpath 规范化 + 前缀校验）</li>
-    <li>POST 表单解析 → 回显页，并做 HTML 转义防 XSS</li>
-  </ul>
-  <p class="note">这一页本身就躺在磁盘上：<code>www/about.html</code>。</p>
+  <header class="page-head">
+    <h1>关于</h1>
+    <p class="lead">一个从零手写的 OJ（在线判题）系统。</p>
+  </header>
+
+  <div class="prose">
+    <p>一期用 Flask 把整条链路跑通：判题器 → 队列 → 落库 → 登录 → 题库 → 排行榜。二期把 Web 层换成 C++ 自研服务端 —— <strong>功能不变，只换实现</strong>。</p>
+
+    <h2>二期已经做到的</h2>
+    <ul class="list">
+      <li>socket → bind → listen → accept 的完整生命周期</li>
+      <li>自己解析请求行 / 头部 / body，处理半包与粘包</li>
+      <li>静态文件服务 + 按后缀推 Content-Type</li>
+      <li>目录穿越防御（realpath 规范化 + 前缀校验）</li>
+      <li>POST 表单解析 → 回显页，并做 HTML 转义防 XSS</li>
+      <li>epoll + 线程池，把「等」和「干」拆开</li>
+      <li>从 MySQL 读取题库，渲染题目详情页</li>
+    </ul>
+
+    <p class="note">这一页本身就躺在磁盘上：<code>www/about.html</code>。</p>
+  </div>
 </main>
-<footer class="foot">二期 C++ 自研服务端 · 正在学 socket 与 HTTP</footer>
+<footer class="foot">二期 C++ 自研服务端：socket、epoll、线程池</footer>
 </body>
 </html>
