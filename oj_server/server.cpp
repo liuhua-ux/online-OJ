@@ -22,6 +22,7 @@
 #include <sys/wait.h>
 #include <random>
 #include <algorithm>
+#include <filesystem>
 
 using namespace std;
 
@@ -590,7 +591,6 @@ bool get_problem_limits(int problem_id, int &tl_ms, int &ml_mb)
     return true;
 }
 
-// worker() 在 handle_request() 前面，先声明一下
 void handle_request(int conn_fd, const string &req);
 
 void worker()
@@ -611,6 +611,112 @@ void worker()
     }
 }
 
+bool set_status(const string &job_id, const string &status)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string sql = "UPDATE submissions SET status = '" + status +
+                 "' WHERE job_id = '" + job_id + "'";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "set_status failed: " << mysql_error(conn) << endl;
+        return false;
+    }
+    return true;
+}
+
+string escape_sql(const string &s)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return "";
+    }
+
+    string buf(s.size() * 2 + 1, '\0');
+    unsigned long n = mysql_real_escape_string(
+        conn, &buf[0], s.c_str(), s.size());
+    buf.resize(n);
+    return buf;
+}
+
+bool finish_job(const string &job_id, const string &result_text,
+                const JudgeSummary &s, int total, bool started)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string verdict = started ? s.verdict : "SE";
+    string result = started ? result_text : "判题器没有跑起来\n" + result_text;
+
+    string esc_result = escape_sql(result);
+    string esc_verdict = escape_sql(verdict);
+
+    string time_sql = s.has_time ? to_string(s.time_ms) : "NULL";
+    string mem_sql = s.has_memory ? to_string(s.memory_kb) : "NULL";
+
+    string sql = "UPDATE submissions SET "
+                 "status = '完成', "
+                 "result = '" +
+                 esc_result + "', "
+                              "verdict = '" +
+                 esc_verdict + "', "
+                               "passed = " +
+                 to_string(s.passed) + ", "
+                                       "total = " +
+                 to_string(total) + ", "
+                                    "time_ms = " +
+                 time_sql + ", "
+                            "memory_kb = " +
+                 mem_sql +
+                 " WHERE job_id = '" + job_id + "'";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "finish_job failed: " << mysql_error(conn) << endl;
+        return false;
+    }
+    return true;
+}
+
+int count_testcases(int problem_id)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return 0;
+    }
+
+    string sql = "SELECT COUNT(*) FROM testcases WHERE problem_id = " +
+                 to_string(problem_id);
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "count_testcases failed: " << mysql_error(conn) << endl;
+        return 0;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == NULL)
+    {
+        return 0;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    int n = (row != NULL) ? stoi(row[0]) : 0;
+
+    mysql_free_result(res);
+    return n;
+}
+
 void judge_worker()
 {
     while (true)
@@ -626,6 +732,8 @@ void judge_worker()
             judge_queue.pop();
         }
 
+        set_status(t.job_id, "判题中");
+
         string data_dir = "/home/ubuntu/online-OJ/judge_demo/testdata/" +
                           to_string(t.problem_id);
         string src_path = t.work_dir + "/submission.cpp";
@@ -634,6 +742,16 @@ void judge_worker()
         bool started = run_judge(src_path, data_dir, t.tl_ms, t.ml_mb, out);
 
         JudgeSummary s = parse_judge(out);
+        int total = count_testcases(t.problem_id);
+
+        finish_job(t.job_id, out, s, total, started);
+
+        std::error_code ec;
+        std::filesystem::remove_all(t.work_dir, ec);
+        if (ec)
+        {
+            cerr << "cleanup failed: " << ec.message() << endl;
+        }
 
         cout << "判题完成 job_id=" << t.job_id
              << " started=" << started
