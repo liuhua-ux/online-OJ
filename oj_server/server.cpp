@@ -21,6 +21,7 @@
 #include "db_config.h"
 #include <sys/wait.h>
 #include <random>
+#include <algorithm>
 
 using namespace std;
 
@@ -351,6 +352,67 @@ bool run_judge(const string &src_path, const string &data_dir, int tl_ms, int ml
     return WIFEXITED(status) && WEXITSTATUS(status) != CHILD_NOT_STARTED;
 }
 
+struct JudgeSummary
+{
+    string verdict;
+    int passed = 0;
+    int time_ms = 0;
+    int memory_kb = 0;
+    bool has_time = false;
+    bool has_memory = false;
+};
+
+JudgeSummary parse_judge(const string &out)
+{
+    JudgeSummary s;
+    istringstream iss(out);
+    string line;
+
+    while (getline(iss, line))
+    {
+        if (!line.empty() && line.back() == '\r')
+        {
+            line.pop_back();
+        }
+
+        if (line.compare(0, 9, "VERDICT: ") == 0)
+        {
+            s.verdict = line.substr(9);
+        }
+        else if (line == "AC")
+        {
+            s.passed++;
+        }
+        else if (line.compare(0, 6, "time: ") == 0 &&
+                 line.size() > 9 &&
+                 line.compare(line.size() - 3, 3, " ms") == 0)
+        {
+            size_t start = 6;
+            size_t end = line.size() - 3;
+            int v = stoi(line.substr(start, end - start));
+            if (v > s.time_ms)
+            {
+                s.time_ms = v;
+            }
+            s.has_time = true;
+        }
+        else if (line.compare(0, 13, "peak memory: ") == 0 &&
+                 line.size() > 16 &&
+                 line.compare(line.size() - 3, 3, " KB") == 0)
+        {
+            size_t start = 13;
+            size_t end = line.size() - 3;
+            int v = stoi(line.substr(start, end - start));
+            if (v > s.memory_kb)
+            {
+                s.memory_kb = v;
+            }
+            s.has_memory = true;
+        }
+    }
+    return s;
+}
+
 MYSQL *get_conn()
 {
     thread_local MYSQL *conn = nullptr;
@@ -571,10 +633,19 @@ void judge_worker()
         string out;
         bool started = run_judge(src_path, data_dir, t.tl_ms, t.ml_mb, out);
 
+        JudgeSummary s = parse_judge(out);
+
         cout << "判题完成 job_id=" << t.job_id
              << " started=" << started
              << " out=" << out.size() << " 字节\n"
              << out << endl;
+
+        cout << "解析 job_id=" << t.job_id
+             << " verdict=" << s.verdict
+             << " passed=" << s.passed
+             << " time=" << s.time_ms << "ms"
+             << " mem=" << s.memory_kb << "KB"
+             << endl;
     }
 }
 
