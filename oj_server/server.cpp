@@ -32,11 +32,11 @@ struct Task
 
 struct JudgeTask
 {
-    string job_id;     
-    string work_dir;   
-    int problem_id;    
-    int tl_ms;          
-    int ml_mb;          
+    string job_id;
+    string work_dir;
+    int problem_id;
+    int tl_ms;
+    int ml_mb;
 };
 
 queue<Task> task_queue;
@@ -528,6 +528,56 @@ bool get_problem_limits(int problem_id, int &tl_ms, int &ml_mb)
     return true;
 }
 
+// worker() 在 handle_request() 前面，先声明一下
+void handle_request(int conn_fd, const string &req);
+
+void worker()
+{
+    get_conn();
+    Task t;
+    while (true)
+    {
+        {
+            unique_lock<mutex> lock(mtx);
+            cv.wait(lock, []
+                    { return !task_queue.empty(); });
+            t = task_queue.front();
+            task_queue.pop();
+        }
+        handle_request(t.conn_fd, t.req);
+        close(t.conn_fd);
+    }
+}
+
+void judge_worker()
+{
+    while (true)
+    {
+        JudgeTask t;
+
+        {
+            unique_lock<mutex> lock(judge_mtx);
+            judge_cv.wait(lock, []
+                          { return !judge_queue.empty(); });
+
+            t = judge_queue.front();
+            judge_queue.pop();
+        }
+
+        string data_dir = "/home/ubuntu/online-OJ/judge_demo/testdata/" +
+                          to_string(t.problem_id);
+        string src_path = t.work_dir + "/submission.cpp";
+
+        string out;
+        bool started = run_judge(src_path, data_dir, t.tl_ms, t.ml_mb, out);
+
+        cout << "判题完成 job_id=" << t.job_id
+             << " started=" << started
+             << " out=" << out.size() << " 字节\n"
+             << out << endl;
+    }
+}
+
 void handle_request(int conn_fd, const string &req)
 {
     size_t head_end = req.find("\r\n\r\n");
@@ -798,24 +848,6 @@ void handle_request(int conn_fd, const string &req)
     }
 }
 
-void worker()
-{
-    get_conn();
-    Task t;
-    while (true)
-    {
-        {
-            unique_lock<mutex> lock(mtx);
-            cv.wait(lock, []
-                    { return !task_queue.empty(); });
-            t = task_queue.front();
-            task_queue.pop();
-        }
-        handle_request(t.conn_fd, t.req);
-        close(t.conn_fd);
-    }
-}
-
 int main()
 {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -862,6 +894,7 @@ int main()
     map<int, string> conn_bufs;
 
     thread t1(worker), t2(worker), t3(worker), t4(worker);
+    thread j1(judge_worker), j2(judge_worker);
 
     while (true)
     {
