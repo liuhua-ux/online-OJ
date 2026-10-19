@@ -52,6 +52,7 @@ condition_variable judge_cv;
 const char *JUDGE_BIN = "/home/ubuntu/online-OJ/judge_demo/judge";
 const string PROBLEM_PREFIX = "/problem/";
 const string SUBMIT_PREFIX = "/submit/";
+const string RESULT_PREFIX = "/result/";
 
 const map<string, string>
     content_types = {
@@ -213,13 +214,14 @@ string html_escape(const string &page)
     return out;
 }
 
-string page_head(const string &title)
+string page_head(const string &title, const string &extra_head = "")
 {
     return "<!DOCTYPE html>\n"
            "<html lang=\"zh-CN\">\n"
            "<head>\n"
            "<meta charset=\"utf-8\">\n"
-           "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+           "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n" +
+           extra_head +
            "<title>" +
            html_escape(title) + " · 自研 OJ</title>\n"
                                 "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231d4ed8'/></svg>\">\n"
@@ -550,6 +552,127 @@ bool render_problem(int problem_id, string &html)
 
     html = page.str();
 
+    mysql_free_result(res);
+    return true;
+}
+
+// 数据库里的 NULL 在页面上统一变成空串 / 破折号
+string cell(const char *p)
+{
+    return p ? p : "";
+}
+
+string num_or_dash(const char *p)
+{
+    return p ? string(p) : "—";
+}
+
+// job_id 是我们自己生成的 8 位小写十六进制；格式不对直接 404，不进数据库
+bool valid_job_id(const string &id)
+{
+    return id.size() == 8 &&
+           id.find_first_not_of("0123456789abcdef") == string::npos;
+}
+
+bool render_result(const string &job_id, string &html)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string sql = "SELECT status, verdict, passed, total, time_ms, "
+                 "memory_kb, result, problem_id, created_at "
+                 "FROM submissions WHERE job_id = '" + job_id + "'";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "query failed: " << mysql_error(conn) << endl;
+        return false;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == NULL)
+    {
+        return false;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    if (row == NULL)
+    {
+        mysql_free_result(res);
+        return false;
+    }
+
+    string status  = cell(row[0]);
+    string verdict = cell(row[1]);
+    string passed  = num_or_dash(row[2]);
+    string total   = num_or_dash(row[3]);
+    string time_ms = num_or_dash(row[4]);
+    string memory  = num_or_dash(row[5]);
+    string raw     = cell(row[6]);
+    string prob_id = cell(row[7]);
+    string created = cell(row[8]);
+
+    bool finished = (status == "完成");
+
+    stringstream page;
+    page << page_head("提交结果",
+                      finished ? ""
+                               : "<meta http-equiv=\"refresh\" content=\"2\">\n");
+
+    page << "<p class=\"breadcrumb\"><a href=\"/problems\">题库</a> / "
+         << "<a href=\"/problem/" << prob_id << "\">第 " << prob_id << " 题</a>"
+         << " / 提交 " << job_id << "</p>\n";
+
+    page << "<header class=\"problem-header\">\n";
+    page << "<h1>判题结果</h1>\n";
+    page << "<div class=\"chips\"><span class=\"chip\">提交号 " << job_id
+         << "</span><span class=\"chip\">" << html_escape(created) << "</span></div>\n";
+    page << "</header>\n";
+
+    if (!finished)
+    {
+        page << "<div class=\"pending\"><span class=\"spinner\"></span>"
+             << html_escape(status) << "，页面每 2 秒自动刷新…</div>\n";
+    }
+    else
+    {
+        string cls = "verdict-other";
+        if (verdict == "AC")
+        {
+            cls = "verdict-ac";
+        }
+        else if (verdict == "WA")
+        {
+            cls = "verdict-wa";
+        }
+        else if (verdict == "CE" || verdict == "TLE" || verdict == "RE" ||
+                 verdict == "MLE" || verdict == "NO_DATA" || verdict == "SE")
+        {
+            cls = "verdict-err";
+        }
+
+        page << "<section class=\"result-card\">\n";
+        page << "<div class=\"verdict-badge " << cls << "\">"
+             << html_escape(verdict.empty() ? "—" : verdict) << "</div>\n";
+        page << "<div class=\"result-stats\">\n";
+        page << "<div><b>" << passed << " / " << total << "</b><span>测试点</span></div>\n";
+        page << "<div><b>" << time_ms << "</b><span>最慢耗时 (ms)</span></div>\n";
+        page << "<div><b>" << memory << "</b><span>峰值内存 (KB)</span></div>\n";
+        page << "</div>\n";
+        page << "</section>\n";
+
+        page << "<h2>判题器输出</h2>\n";
+        page << "<pre class=\"result-output\">" << html_escape(raw) << "</pre>\n";
+    }
+
+    page << "<p class=\"note\"><a href=\"/problem/" << prob_id
+         << "\">← 回题目</a>　<a href=\"/problems\">题库</a></p>\n";
+    page << page_tail();
+
+    html = page.str();
     mysql_free_result(res);
     return true;
 }
@@ -978,6 +1101,18 @@ void handle_request(int conn_fd, const string &req)
 
         cout << "入队 job_id=" << job_id << " problem=" << problem_id << endl;
         send_redirect(conn_fd, "/result/" + job_id);
+    }
+    else if (target.compare(0, RESULT_PREFIX.size(), RESULT_PREFIX) == 0)
+    {
+        string id = target.substr(RESULT_PREFIX.size());
+        string html;
+
+        if (!valid_job_id(id) || !render_result(id, html))
+        {
+            send_response(conn_fd, 404, "没有这条提交\n");
+            return;
+        }
+        send_response(conn_fd, 200, html, "text/html; charset=utf-8");
     }
     else if (target == "/problems")
     {
