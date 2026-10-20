@@ -37,3 +37,6 @@ __pycache__/
 # 数据库配置（含密码，绝不提交）
 web/db_config.py
 oj_server/db_config.h
+
+# 本地刷题记录（只留本地，不进 git）
+hot100/
