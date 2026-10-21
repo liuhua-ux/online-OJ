@@ -931,7 +931,164 @@ if (mysql_real_connect(conn, DB_HOST, ...))     // ← 反的
 
 `db_config.h`（新，含密码，已进 .gitignore）、`server.cpp`（`get_conn` / `render_problems` / `/problems` 路由 / `worker` 预热 / 两个 `mysql_close` 删除 / **失败检查**）、`.gitignore`（+`oj_server/db_config.h`）。`db_test.cpp` ＋ `db_test` **跑完即删**（同一期 `web/db_test.py` 的先例）。
 
-**下一步**：**接判题器**（`/submit` 主干道）。
+**下一步**：~~接判题器~~ → 已走完，见 §29。
+
+---
+
+### 29. ⭐ 接判题器（2026-10-16 ~ 10-19，`694f772` → `eaff82d`）
+
+`CH-11` 的前四步都是「把一期搬过来」，这一步是第一块**真正属于二期的新业务**：
+浏览器交一份 C++，服务端 fork 判题器、收结果、落库、再把结果页刷出来。
+
+**先拍板的三个决定**（2026-10-16）：
+
+1. **先绕开登录** —— C++ 侧 `grep -ci "cookie|session|login"` = **0**；一期登录才 5 行，留到最后补。
+   → 代价：`submissions.username` 恒为 `NULL`（见 29h）。
+2. **判题工人另起一组**：**2 个判题线程 + 独立判题队列**，跟 HTTP 的 4 个工人分开。
+   理由：判题是**秒级到分钟级**，HTTP 是**毫秒级**；混在一个池子里，一次判题就把 HTTP 堵死。
+3. 顺手轮换了 `oj_app` 的数据库密码。
+
+**五个子步：**
+
+| 子步 | 内容 | 提交 |
+| --- | --- | --- |
+| 1 | `run_judge()` —— fork/exec + 管道收 stdout | `694f772` |
+| 2a | `/problem/<题号>` 路由 + `render_problem()` | `0da4c11` |
+| 2b | 题面 8 字段 + 提交框（前置：`page_head()` / `page_tail()`） | `4a5d117` / `a447c85` |
+| 3a | `POST /submit/<题号>` 接表单 + 空代码校验 | `618ec8f` |
+| 3b | `make_job_id()` → 工作目录 → 落库 → 302 | `a105b5c` / `c99a55d` / `3457965` |
+| 4a | `JudgeTask` + 判题队列 + 入队 | `203bbb7` |
+| 4b | 判题工人取任务、调 `run_judge()` | `131a870` |
+| 4c | 解析输出 → 写回数据库 → 清理临时目录 | `2ba0973` / `519658e` |
+| 5 | `/result/<job_id>` 结果页（自动刷新 + 转义） | `eaff82d` |
+
+（另有一次前端改版 `80f8ccc`：蓝白判题单风格，首页 / 题库 / 题目页 / 编辑器。）
+
+#### 29a. `run_judge()` —— 我们当的是「可执行文件的客户」
+
+```c
+bool run_judge(const string &src_path, const string &data_dir,
+               int tl_ms, int ml_mb, string &out);
+```
+
+- **第二参数是目录，不是文件。** 他最初写的形状是 `judge_result(in_path, ans_path, ...)` ——
+  那是判题器**内部** `run_one_test()`（管**一组**测试点）的形状。
+  我们当的是**判题器这个可执行文件**的客户，它自己遍历整道题，所以给的是**题号目录**。
+  （他自己 NOTES 里那句「换一道题 = 换 `argv[2]`」正好是答案。）
+- **⭐ `cwd` 是关键。** 判题器 `compile()` 里 `g++ -o test`、`run_one_test()` 里 `output.txt` **全是相对路径**，
+  落在它**自己的 cwd**。所以子进程必须 `chdir(源码所在目录)`。
+  **不 chdir 的后果有两层**：① 产物掉进 `oj_server/`；② **两个判题工人踩同一个 `test`**
+  —— 拿 A 的产物跑 B 的测试点，**静默错判**。
+  这正是 `judge_demo/NOTES.md`「已知最严重缺陷」（FIX-01）的同一条，接进服务端后以更大形式回来。
+- **⭐⭐ 判「判题器起没起来」只能用 `waitpid` 的 `status`：**
+  ```c
+  WIFEXITED(status) && WEXITSTATUS(status) != 127   // 127 = 子进程没起来的哨兵
+  ```
+  **不能用 `out == ""`** —— 空串有**两义**：`exec` 失败（`_exit(127)`）**和**
+  「跑起来了但一句话没说」（`argc < 3` 时 judge 只往 stderr 打 Usage、退 1）。
+
+**实测三个数**（预期与实测全中）：
+
+| 场景 | raw `status` | 退出码 |
+| --- | --- | --- |
+| AC | `0` | `0` |
+| WA | **`256`** | `1` |
+| judge 路径不存在 | **`32512`** | `127` |
+
+`256 = 1<<8`、`32512 = 127<<8` —— 这两组数就是「status 是打包整数」的铁证（低 7 位信号号，高 8 位退出码）。
+
+#### 29b. 路由前缀：`compare` 不是 `find`
+
+```cpp
+target.compare(0, PROBLEM_PREFIX.size(), PROBLEM_PREFIX) == 0
+```
+
+他先写的 `target.find("/problem/")` —— **`find` 问的是「在不在里面」，不是「在不在开头」**，
+`/xxx/problem/1` 也会命中。同决策 15「黑名单 vs 白名单」：**问错了问题**。
+
+题号抠出来之后**三道关卡**：
+
+1. `!num.empty()` —— 挡 `/problem/`
+2. `find_first_not_of("0123456789") == npos` —— 挡 `stoi("1abc") == 1` 这种**静默给错值**
+3. `try/catch` 接 `out_of_range` —— 挡 `/problem/99999999999999999999`
+
+**⭐ 404 必须放在 `if` 外面（单一出口）。** 他一开始写在 `if` 里面 → 烂输入走不进 `if` →
+**一个字节都不发** → curl 拿到 `000` 而不是 `404`。
+`404` = 服务器**说了话**；`000` = **一个字没说就关连接**，客户端分不清「崩了」还是「忘了回话」，
+浏览器上就是转圈。**光点浏览器发现不了这个。**
+
+#### 29c. 每次提交一个独立的临时工作目录
+
+```cpp
+char tmpl[] = "/tmp/oj_XXXXXX";
+char *dir = mkdtemp(tmpl);          // 原子地建目录 + 拿到唯一名字
+```
+
+→ 写 `work_dir/submission.cpp` → `JudgeTask` 带上这个路径 → 判完 `remove_all`。
+
+**为什么必须是 `mkdtemp`**：并发的两次提交如果共用一个目录，就是 29a 里那个「A 的产物跑 B 的测试点」。
+唯一目录名是**正确性**，不是整洁。
+
+#### 29d. 判题队列 + 2 个判题工人
+
+```cpp
+thread t1(worker), t2(worker), t3(worker), t4(worker);   // HTTP：4 个
+thread j1(judge_worker), j2(judge_worker);               // 判题：2 个
+```
+
+- `JudgeTask` 队列由 `judge_mtx` + `judge_cv` 保护，**和 HTTP 的 `task_queue` 是两条独立的线**。
+- 状态机：`排队中` →（工人取走）`判题中` →（写回）`完成`。
+- **判题工人数 = 2 是个取舍**：每个判题进程会 fork 出一个 `g++` 和一个跑测试点的子进程，
+  再加 scrypt 量级的内存/CPU，开多了会把机器压住。这是课程设计尺度下的取值，不是理论最优。
+
+#### 29e. 解析判题器输出：`parse_judge()`
+
+判题器输出是**人读的文本**，所以靠字符串抠（一期 FIX-06 同款做法，原始文本继续存库当现场证据）：
+
+| 行 | 抠出 |
+| --- | --- |
+| `VERDICT: AC` | `verdict` |
+| 单独一行 `AC` | `passed++`（每个通过的测试点一行） |
+| `time: 12 ms` | 取**最大值** |
+| `peak memory: 2048 KB` | 取**最大值** |
+
+三个值得记的点：
+
+- **取 max 不取 last** —— 多个测试点报的是「最慢那一组 / 峰值最大的那一组」。
+- **`has_time` / `has_memory` 两个标志** —— 没出现时写 **`NULL` 而不是 `0`**。
+  `0 ms` 是**合法值**，不能用它表示「没有这个数」。同决策里的老规矩：**别让一个值承担两种含义**。
+- **`\r` 要手动剥** —— `getline` 把 `\r` 留给你（决策 4），判题器输出在管道里通常是 `\n`，
+  但别赌。
+
+#### 29f. 写回数据库 + 清理
+
+一条 `UPDATE` 写完七列：`status / result / verdict / passed / total / time_ms / memory_kb`。
+
+- **`started == false` 时 `verdict` 写 `"SE"`**（System Error）——
+  **判题器没起来不是用户的错**，不能混进 WA/RE。
+- **`result` 存原文**，不存解析后的结构 —— 出怪问题时这是唯一的现场。
+- **`escape_sql()` 包一层** `mysql_real_escape_string` —— `result` 里会含 g++ 的错误信息，
+  里面带引号是常态。
+- 清理用 `std::filesystem::remove_all(dir, ec)` 的**带 `error_code` 重载** ——
+  删不掉只记日志，**不让它抛异常把工人线程带走**。
+
+#### 29g. `/result/<job_id>`
+
+- `valid_job_id()`：**8 位小写十六进制**（和 `make_job_id()` 对齐）。
+- 未完成时用 `<meta http-equiv="refresh" content="2">` **每 2 秒自动刷新**，完成就停。
+- 原始输出经 `html_escape()` 再进 `<pre>` —— **一期 FIX-17 的教训，二期不能再犯一次**。
+
+#### 29h. 这一步留下的已知缺口
+
+- ⚠️ **`submissions.username` 恒为 `NULL`** —— 没有登录，提交不知道是谁的。
+- ⚠️ **`/result/<job_id>` 无归属校验** —— 一期 `FIX-11` 已解决（越权 403），**二期这里是退步**，
+  等登录到位必须补回来。
+- ⚠️ **`data_dir` 是硬编码绝对路径**（`/home/ubuntu/online-OJ/judge_demo/testdata/<题号>`）——
+  换机器就得改代码。
+- **结果解析靠字符串抠** —— 判题器改一个字（比如 `time:` 变 `Time:`）整列就静默变 `NULL`。
+  一期的 `parse_result()` 有同样的问题，这是同一个「协议靠格式约定」的代价。
+
+**下一步**：**登录 / 会话**（`/login` + 服务端 session），把 29h 前两条一起还掉。
 
 ## 实测数字汇总
 
@@ -1048,6 +1205,11 @@ server(pid 2445554) 手上只有一条连接：127.0.0.1:43456   Recv-Q 0     �
 - ⚠️ **`worker()` 里没有 `try/catch`**：`handle_request` 抛异常（如 `stoi`）→ `std::terminate` → **整个进程死**。
   和线程池之前**结果一样**（不是本步引入），但值得记 —— 一期 Flask 那个「没 except，工人线程静默死掉」
   是同一课的 Python 版。
+- ⚠️ **`submissions.username` 恒为 `NULL`**：C++ 侧**没有任何登录/会话代码**（决策 29 的第 1 条选择）。
+  提交不知道是谁的，`/submissions`、`/rank` 都做不了。**下一站补。**
+- ⚠️ **`/result/<job_id>` 无归属校验**：知道提交号就能看别人的。一期 `FIX-11` 已解决（越权 403），
+  **二期这里是实打实的退步**，登录到位后必须补回来。
+- ⚠️ **判题数据目录硬编码**：`/home/ubuntu/online-OJ/judge_demo/testdata/<题号>`，换机器要改代码。
 
 ## 下一步
 
@@ -1073,7 +1235,13 @@ server(pid 2445554) 手上只有一条连接：127.0.0.1:43456   Recv-Q 0     �
 - ~~a-2 `/echo` 回显页 + 🔒 XSS~~ —— **已完成**（`62cfb7d`）
 - ~~a-3 路径 URL 解码 + 黑名单/白名单对照实测~~ —— **已完成**（`8af7f30`）
 - ~~**接 MySQL**~~ —— ✅ **已完成**（**决策 28**）：`/problems` 从库读题渲染、`thread_local` 每线程一条连接（57ms → 1ms）
-- 队伍最前面 = **接判题器**（`/submit` 那条主干道；第 ④ 步已完成，见上）
+- ~~**接判题器**~~ —— ✅ **已完成**（**决策 29**，`694f772` → `eaff82d`）。
+  提交 → 入队 → 判题 → 落库 → `/result/<job_id>` 自动刷新，**主干道打通**。
+- 队伍最前面 = **登录 / 会话**（`/login` + 服务端 session）。
+  解锁三样：提交归属（`username` 不再恒 `NULL`）、`/result` 越权校验（一期 `FIX-11` 的二期版）、
+  后面的 `/submissions` 与 `/rank`。
+  子步计划：① scrypt 校验（`EVP_PBE_scrypt`，兼容库里 werkzeug 的 `scrypt:...`）② `sessions` 表 + `POST /login`
+  ③ 路由守卫 ④ `/register` / `/logout` / 改密。
 
 ## 待做的对照实验
 

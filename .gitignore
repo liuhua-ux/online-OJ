@@ -40,3 +40,6 @@ oj_server/db_config.h
 
 # 本地刷题记录（只留本地，不进 git）
 hot100/
+
+# 简历（只留本地，不进 git）
+docs/简历/
