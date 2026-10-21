@@ -1,4 +1,5 @@
 #include "auth.h"
+#include "db.h"
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -20,7 +21,6 @@
 #include <condition_variable>
 #include <queue>
 #include <mysql/mysql.h>
-#include "db_config.h"
 #include <sys/wait.h>
 #include <random>
 #include <algorithm>
@@ -65,7 +65,7 @@ const map<string, string>
         {"", "application/octet-stream"},
 };
 
-void send_response(int conn_fd, int code, const string &body, const string &content_type = "text/plain; charset=utf-8")
+void send_response(int conn_fd, int code, const string &body, const string &content_type = "text/plain; charset=utf-8", const string &extra_headers = "")
 {
     string reason;
     if (code == 200)
@@ -93,22 +93,24 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
                                                                  "Content-Type: " +
                   content_type + "\r\n"
                                  "Content-Length: " +
-                  to_string(body.size()) + "\r\n"
-                                           "Connection: close\r\n"
-                                           "\r\n" +
+                  to_string(body.size()) + "\r\n" +
+                  extra_headers +
+                  "Connection: close\r\n"
+                  "\r\n" +
                   body;
 
     write(conn_fd, resp.c_str(), resp.size());
 }
 
-void send_redirect(int conn_fd, const string &location)
+void send_redirect(int conn_fd, const string &location, const string &extra_headers = "")
 {
     string resp = "HTTP/1.1 302 Found\r\n"
                   "Location: " +
-                  location + "\r\n"
-                             "Content-Length: 0\r\n"
-                             "Connection: close\r\n"
-                             "\r\n";
+                  location + "\r\n" +
+                  extra_headers +
+                  "Content-Length: 0\r\n"
+                  "Connection: close\r\n"
+                  "\r\n";
     write(conn_fd, resp.c_str(), resp.size());
 }
 
@@ -418,27 +420,6 @@ JudgeSummary parse_judge(const string &out)
     return s;
 }
 
-MYSQL *get_conn()
-{
-    thread_local MYSQL *conn = nullptr;
-
-    if (conn == nullptr)
-    {
-        conn = mysql_init(nullptr);
-        if (conn == nullptr)
-        {
-            return nullptr;
-        }
-        if (mysql_real_connect(conn, DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT, NULL, 0) == NULL)
-        {
-            mysql_close(conn);
-            conn = nullptr;
-            return nullptr;
-        }
-    }
-    return conn;
-}
-
 string render_problems()
 {
     MYSQL *conn = get_conn();
@@ -586,7 +567,8 @@ bool render_result(const string &job_id, string &html)
 
     string sql = "SELECT status, verdict, passed, total, time_ms, "
                  "memory_kb, result, problem_id, created_at "
-                 "FROM submissions WHERE job_id = '" + job_id + "'";
+                 "FROM submissions WHERE job_id = '" +
+                 job_id + "'";
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
@@ -607,13 +589,13 @@ bool render_result(const string &job_id, string &html)
         return false;
     }
 
-    string status  = cell(row[0]);
+    string status = cell(row[0]);
     string verdict = cell(row[1]);
-    string passed  = num_or_dash(row[2]);
-    string total   = num_or_dash(row[3]);
+    string passed = num_or_dash(row[2]);
+    string total = num_or_dash(row[3]);
     string time_ms = num_or_dash(row[4]);
-    string memory  = num_or_dash(row[5]);
-    string raw     = cell(row[6]);
+    string memory = num_or_dash(row[5]);
+    string raw = cell(row[6]);
     string prob_id = cell(row[7]);
     string created = cell(row[8]);
 
@@ -753,21 +735,6 @@ bool set_status(const string &job_id, const string &status)
         return false;
     }
     return true;
-}
-
-string escape_sql(const string &s)
-{
-    MYSQL *conn = get_conn();
-    if (conn == nullptr)
-    {
-        return "";
-    }
-
-    string buf(s.size() * 2 + 1, '\0');
-    unsigned long n = mysql_real_escape_string(
-        conn, &buf[0], s.c_str(), s.size());
-    buf.resize(n);
-    return buf;
 }
 
 bool finish_job(const string &job_id, const string &result_text,
@@ -921,6 +888,10 @@ void handle_request(int conn_fd, const string &req)
             continue;
 
         string name = line.substr(0, pos);
+        for (char &ch : name)
+        {
+            ch = tolower(ch);
+        }
         string value = line.substr(pos + 1);
         if (!value.empty() && value.front() == ' ')
         {
@@ -936,10 +907,17 @@ void handle_request(int conn_fd, const string &req)
         cout << kv.first << "=" << kv.second << "\n";
     }
 
-    size_t body_need = 0;
-    if (headers.count("Content-Length"))
+    string session_id;
+    if (headers.count("cookie"))
     {
-        length = headers["Content-Length"];
+        session_id = cookie_value(headers["cookie"], "session");
+    }
+    cout << "session  = [" << session_id << "]" << endl;
+
+    size_t body_need = 0;
+    if (headers.count("content-length"))
+    {
+        length = headers["content-length"];
         cout << " body length = " << length << "\n";
         body_need = stoi(length);
 
@@ -1115,6 +1093,112 @@ void handle_request(int conn_fd, const string &req)
             return;
         }
         send_response(conn_fd, 200, html, "text/html; charset=utf-8");
+    }
+    else if (target == "/login")
+    {
+        if (method == "POST")
+        {
+            string username, password;
+            if (form.count("username"))
+                username = form["username"];
+            if (form.count("password"))
+                password = form["password"];
+
+            if (username.empty() || password.empty())
+            {
+                send_response(conn_fd, 400, "用户名和密码都要填\n");
+                return;
+            }
+
+            MYSQL *conn = get_conn();
+            if (conn == nullptr)
+            {
+                send_response(conn_fd, 500, "数据库暂时不可用\n");
+                return;
+            }
+
+            string sql = "SELECT password_hash, is_disabled FROM users "
+                         "WHERE username = '" +
+                         escape_sql(username) + "'";
+
+            if (mysql_query(conn, sql.c_str()) != 0)
+            {
+                cerr << "login query failed: " << mysql_error(conn) << endl;
+                send_response(conn_fd, 500, "数据库暂时不可用\n");
+                return;
+            }
+
+            MYSQL_RES *res = mysql_store_result(conn);
+            if (res == nullptr)
+            {
+                send_response(conn_fd, 500, "数据库暂时不可用\n");
+                return;
+            }
+
+            MYSQL_ROW row = mysql_fetch_row(res);
+
+            bool ok = false;
+            bool disabled = false;
+            if (row != nullptr)
+            {
+                ok = scrypt_verify(password, row[0]);
+                disabled = (row[1] != nullptr && string(row[1]) == "1");
+            }
+
+            mysql_free_result(res);
+
+            // 用户不存在 和 密码不对，故意返回同一句话
+            if (!ok)
+            {
+                send_response(conn_fd, 200, "用户名或密码不对\n");
+                return;
+            }
+
+            // 禁用检查放密码之后：密码答对了才说这句
+            if (disabled)
+            {
+                send_response(conn_fd, 200, "这个账号已被禁用，请联系管理员\n");
+                return;
+            }
+
+            string sid = create_session(username);
+            if (sid.empty())
+            {
+                send_response(conn_fd, 500, "登录失败，请重试\n");
+                return;
+            }
+
+            string cookie = "Set-Cookie: session=" + sid +
+                            "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" +
+                            to_string(SESSION_TTL_SECONDS) + "\r\n";
+
+            send_redirect(conn_fd, "/problems", cookie);
+            return;
+        }
+        else
+        {
+            stringstream page;
+            page << page_head("登录")
+                 << "<div class=\"form\">\n"
+                 << "<form method=\"POST\" action=\"/login\">\n"
+                 << "<p>用户名：<input name=\"username\"></p>\n"
+                 << "<p>密码：<input name=\"password\" type=\"password\"></p>\n"
+                 << "<button type=\"submit\">登录</button>\n"
+                 << "</form>\n"
+                 << "</div>\n"
+                 << page_tail();
+            send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
+        }
+    }
+    else if (target == "/logout")
+    {
+        if (!session_id.empty())
+        {
+            destroy_session(session_id);
+        }
+
+        string cookie = "Set-Cookie: session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0\r\n";
+        send_redirect(conn_fd, "/", cookie);
     }
     else if (target == "/problems")
     {

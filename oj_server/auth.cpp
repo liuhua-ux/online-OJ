@@ -1,9 +1,12 @@
 #include "auth.h"
+#include "db.h"
 
 #include <openssl/evp.h>
 #include <openssl/crypto.h>
 #include <cstdio>
 #include <sstream>
+#include <random>
+#include <iostream>
 
 using namespace std;
 
@@ -88,7 +91,7 @@ bool scrypt_verify(const string &password, const string &stored)
     int rc = EVP_PBE_scrypt(password.data(), password.size(),
                             (const unsigned char *)salt.data(), salt.size(),
                             N, r, p,
-                            132L * N * r * p,   
+                            132L * N * r * p,
                             out.data(), out.size());
     if (rc != 1)
     {
@@ -105,4 +108,121 @@ bool scrypt_verify(const string &password, const string &stored)
     }
 
     return CRYPTO_memcmp(got.data(), expected_hex.data(), got.size()) == 0;
+}
+
+string make_session_id()
+{
+    static const char *hex = "0123456789abcdef";
+    thread_local random_device rd;
+
+    string id;
+    for (int i = 0; i < 32; i++)
+    {
+        id += hex[rd() % 16];
+    }
+    return id;
+}
+
+string create_session(const string &username)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return "";
+    }
+
+    string id = make_session_id();
+    string sql = "INSERT INTO sessions (session_id, username, created_at, expires_at) "
+                 "VALUES ('" +
+                 id + "', '" + escape_sql(username) + "', NOW(), "
+                                                      "NOW() + INTERVAL " +
+                 to_string(SESSION_TTL_SECONDS) + " SECOND)";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "create_session failed: " << mysql_error(conn) << endl;
+        return "";
+    }
+    return id;
+}
+
+string get_session_user(const string &session_id)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return "";
+    }
+
+    string sql = "SELECT username FROM sessions "
+                 "WHERE session_id = '" +
+                 escape_sql(session_id) + "' "
+                                          "AND expires_at > NOW()";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "get_session_user failed: " << mysql_error(conn) << endl;
+        return "";
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+    {
+        return "";
+    }
+
+    string user;
+    MYSQL_ROW row = mysql_fetch_row(res);
+    if (row != nullptr && row[0] != nullptr)
+    {
+        user = row[0];
+    }
+
+    mysql_free_result(res);
+    return user;
+}
+
+bool destroy_session(const string &session_id)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string sql = "DELETE FROM sessions WHERE session_id = '" +
+                 escape_sql(session_id) + "'";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "destroy_session failed: " << mysql_error(conn) << endl;
+        return false;
+    }
+    return true;
+}
+
+string cookie_value(const string &cookie_header, const string &name)
+{
+    for (const auto &part : split(cookie_header, ';'))
+    {
+        string p = part;
+
+        // 分隔符后面通常跟一个空格，要去掉
+        while (!p.empty() && (p.front() == ' ' || p.front() == '\t'))
+        {
+            p.erase(0, 1);
+        }
+
+        size_t eq = p.find('=');
+        if (eq == string::npos)
+        {
+            continue;
+        }
+
+        if (p.substr(0, eq) == name)
+        {
+            return p.substr(eq + 1);
+        }
+    }
+    return "";
 }
