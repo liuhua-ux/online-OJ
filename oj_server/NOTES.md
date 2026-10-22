@@ -8,7 +8,7 @@
 
 ```
 cd ~/online-OJ/oj_server
-g++ -Wall -o server server.cpp auth.cpp db.cpp $(mysql_config --cflags --libs) -lcrypto
+g++ -Wall -o server server.cpp auth.cpp db.cpp $(mysql_config --cflags --libs) -lcrypto -lhiredis
 ./server                      # 监听 8080
 ```
 
@@ -27,6 +27,7 @@ g++ -Wall -o server server.cpp auth.cpp db.cpp $(mysql_config --cflags --libs) -
 | `POST /submit/<id>` | **需登录** → 建临时目录、写文件、入库（带 `username`）、入判题队列 |
 | `GET /result/<job_id>` | **需登录 + 归属校验** → 本人或 admin 可看；含**提交的源码** |
 | `GET /submissions` | **需登录**：学生只看本人，admin 看全部、可 `?user=` 筛选，倒序 `LIMIT 100` |
+| `GET /rank` | **需登录**：按通过题数降序；Redis 缓存 60s，缓存故障降级查库 |
 | `GET/POST /login` | 表单 / 校验 `scrypt` 后发会话 cookie |
 | `GET /logout` | 删会话 + 清 cookie |
 | `GET/POST /register` | 注册（重名靠唯一键 1062 识别） |
@@ -1316,7 +1317,108 @@ else if (!filter_user.empty())  where = " WHERE s.username = '" + escape_sql(fil
 - ⚠️ **源码无长度上限** —— `MEDIUMTEXT` 能装 16MB，但没有任何提交前检查。
 - ⚠️ **需求 `OJ-REC-01` 的「是否对他人可见可配置」没做** —— 目前固定：本人 + 管理员可见。
 
-**下一步**：`/rank`（排行榜，Redis 第一次上场）。
+**下一步**：~~`/rank`~~ → 已走完，见 §32。
+
+### 32. 排行榜 + Redis 缓存（2026-10-22）
+
+需求对应：`OJ-RNK-01`。也是二期代码里 **Redis 第一次上场**（一期 Flask 早就用了）。
+
+#### 32a. 为什么排行榜适合缓存
+
+榜单是**派生数据**：每一个数字都能从 `submissions` 重算出来。所以：
+
+- 丢了**不是灾难**，重算一遍就有；
+- 但它要 `GROUP BY` 全表，**每次请求都算一遍很浪费**。
+
+→ 这就是"缓存"最典型的对象：**读多、写少、能重算、偶尔旧一点没关系**。
+
+#### 32b. hiredis 的回复类型（决定缓存逻辑怎么写）
+
+先写了一个一次性探针 `redis_probe.cpp`（跑完已删），实测：
+
+```
+PING(空参数)  type=1 str=[]         ← STRING，不是 PONG
+SET           type=5 str=[OK]       ← STATUS
+GET           type=1 str=[hello]    ← STRING
+GET 不存在的键 type=4 str=[(null)]   ← NIL
+DEL           type=3 integer=2      ← INTEGER（数字在 integer，不在 str）
+SET "" 再 GET  type=1 str=[]         ← 空串也是 STRING
+```
+
+**最要命的一条**：`NIL(4)` = 没缓存；`STRING(1) 空串` = 缓存了一个空榜。
+**只看 `str` 是不是空会分不出这两件事** → 空榜每次都被当成 miss，缓存等于没做。
+代码里判断命中写的是 `r->type == REDIS_REPLY_STRING`，不是 `r->str != nullptr`。
+
+另外两条规矩：
+
+- **每个 `redisReply` 都要 `freeReplyObject`**（同 `mysql_free_result`）；
+- **`redisConnect` 默认没有超时**，必须用 `redisConnectWithTimeout`（这里 200ms）——
+  否则 Redis 一挂，请求卡在连接上，"降级"根本来不及发生。
+
+#### 32c. 键名冲突：一期已经占了 `oj:rank`
+
+一期 Flask 和二期 C++ **共用同一台 Redis**。一期的键叫 `oj:rank`，存的是 **JSON**；
+二期的格式是 `用户名<TAB>题数` 的文本。**同一个键、两种格式** → 双方解析都失败、互相覆盖，
+各自的"缓存"变成每请求都白查一次库。
+
+→ 二期用 **`oj:rank:v2`**。**同一台 Redis 是共享命名空间，这是 Redis 没有"库表"的直接后果**
+（决策 31 讲过的那个代价）。
+
+#### 32d. 缓存读写：失败一律当"没有"
+
+```
+rank_cache_get()   → 连不上/超时/NIL/格式坏 → false（去查库）
+rank_query_db()    → 查库失败 → 页面显示「排行榜暂时读不出来」
+rank_cache_set()   → 写失败就失败，反正数据已经拿到了
+```
+
+- **读写缓存都不许把异常抛给页面** —— 需求原话：「缓存不可用 → 降级为直接查询数据库，
+  **不得因缓存故障导致页面不可用**」。
+- 页面上有一行「数据来源：Redis 缓存 / 直接查数据库」—— **把降级变成看得见的东西**
+  （演示时直接 `systemctl stop redis-server` 就能看见）。
+
+#### 32e. 序列化格式与它的局限
+
+缓存里存的是 `用户名<TAB>题数\n` 的纯文本，不用 JSON 库。
+
+- 读的时候用 `string(r->str, r->len)` —— **带长度**，不靠 `\0` 判断结尾（二进制安全）。
+- ⚠️ **用户名里如果有 TAB 或换行，格式会被撑坏**（当前注册只限制长度，没限制字符）。
+  这是这份"自制序列化"的已知代价，真要修：要么限制用户名可用字符，要么改用 JSON。
+
+#### 32f. 什么时候让缓存作废
+
+`finish_job()` 写完库之后：
+
+```cpp
+if (verdict == "AC") rank_cache_invalidate();
+```
+
+**只有 AC 会让榜单变化**；WA/TLE/CE 不改变「谁通过了哪题」，删了纯属浪费。
+另外还有 60 秒 TTL 兜底 —— 即使漏了某条失效路径，最多旧 60 秒。
+
+#### 32g. 实测（2026-10-22）
+
+| 场景 | 结果 |
+| --- | --- |
+| 首次访问 | 「直接查数据库」，`oj:rank:v2` 出现，**TTL=60**，`strlen=0`（空榜） |
+| 第二次访问 | 「Redis 缓存」—— **空串缓存也命中**（type=1 不是 NIL） |
+| 同一题 AC 两次 | 只算 **1 题**（`COUNT(DISTINCT problem_id)`） |
+| 排序 | 题数降序；同分按用户名升序（`<b>hack2` 排在 `rank_b` 前） |
+| 转义 | 用户名 `<b>hack2` 显示为 `&lt;b&gt;hack2` |
+| AC 之后 | 键**立刻消失**（`EXISTS=0`），下次访问重算 |
+| **停掉 Redis** | `/rank` 仍 **200**，2.5ms，显示「直接查数据库」，数据正常 |
+| 恢复 Redis | 自动回到「Redis 缓存」 |
+
+#### 32h. 本步留下的缺口
+
+- ⚠️ **缓存击穿**：过期瞬间多个请求同时查库 —— 课程尺度无所谓，生产要加互斥或逻辑过期。
+- ⚠️ **单键全量**：榜单一次全读全写，100 名以外看不到（`LIMIT 100`）。
+- ⚠️ **没用 ZSET**：真实排行榜用 `ZADD`/`ZREVRANGE` 可以做到「只取前 N、自动排序」；
+  这里为了与一期对齐，缓存的是算好的整表。
+- ⚠️ **用户名里的 TAB/换行会破坏缓存格式**（见 32e）。
+
+**下一步**：二期还差一期的 **`/admin/*` 管理功能**（题目增删改、用户管理）——
+这是 `CH-11`「功能需求不变」剩下的最后一块；此外还欠与一期 Flask 的对照压测。
 
 ## 实测数字汇总
 
@@ -1369,6 +1471,9 @@ else if (!filter_user.empty())  where = " WHERE s.username = '" + escape_sql(fil
 | 源码入库 | 提交 **130 字节**（含 `'` `"` `\` 中文）→ 库里 **130 字节，`cmp` 逐字节相同** |
 | 题目页预填 | 回题目页取回 **130 字节**逐字节相同；交第二次取到**最新**；他人/未登录为空 |
 | 结果页源码 | **130 字节**逐字节相同；老提交 `03eec3f0` 显示「（老数据·无源码）」 |
+| 排行榜缓存 | 首次「直接查数据库」→ **TTL=60** → 第二次「Redis 缓存」；空榜 `strlen=0` **也命中** |
+| AC 后失效 | `EXISTS oj:rank:v2` 从 **1 → 0**，下次访问重算 |
+| **Redis 停掉** | `/rank` 仍 **200**、**2.5ms**、「直接查数据库」；恢复后回到缓存 |
 
 **队头阻塞复现**（第 ③ 步的动机，一次成功）：
 
@@ -1479,7 +1584,9 @@ server(pid 2445554) 手上只有一条连接：127.0.0.1:43456   Recv-Q 0     �
   ④ `/register` / `/logout` / 改密 —— **四个子步全齐**。
 - ~~**`/submissions`（我的提交列表）**~~ —— ✅ **已完成**（**决策 31**）。
   顺带把 `submissions.source` 落库，题目页预填 + 结果页展示 —— **`OJ-REC-01` 的「源码展示」缺口在二期补上了**。
-- 队列最前面 = **`/rank`（排行榜，Redis 第一次上场）**。
+- ~~**`/rank`（排行榜）**~~ —— ✅ **已完成**（**决策 32**）：Redis 缓存 60s、AC 后失效、缓存故障降级查库。
+- 队列最前面 = **`/admin/*` 管理功能**（题目增删改、用户管理）—— `CH-11`「功能不变」的最后一块。
+- 还欠：**与一期 Flask / 单线程版的对照压测**（见「待做的对照实验」）。
 
 ## 待做的对照实验
 

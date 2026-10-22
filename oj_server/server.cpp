@@ -22,6 +22,9 @@
 #include <queue>
 #include <mysql/mysql.h>
 #include <sys/wait.h>
+#include <hiredis/hiredis.h>
+#include <sys/time.h>
+#include <vector>
 #include <random>
 #include <algorithm>
 #include <filesystem>
@@ -55,6 +58,14 @@ const char *JUDGE_BIN = "/home/ubuntu/online-OJ/judge_demo/judge";
 const string PROBLEM_PREFIX = "/problem/";
 const string SUBMIT_PREFIX = "/submit/";
 const string RESULT_PREFIX = "/result/";
+
+// 排行榜缓存。榜单是派生数据，过期重算即可（需求 OJ-RNK-01）
+// ⚠️ 一期 Flask 也在用 Redis，它的键是 "oj:rank"、存的是 JSON。
+// 同一台 Redis 是共享命名空间：键一样但格式不同 → 双方解析都失败、互相覆盖，缓存白做。
+// 二期用独立的键，两期可以并存对照。
+const string RANK_CACHE_KEY = "oj:rank:v2";
+const int RANK_CACHE_TTL = 60;         // 秒
+const int REDIS_TIMEOUT_US = 200000;   // 200ms：Redis 挂了也不能让页面一起卡死
 
 const map<string, string>
     content_types = {
@@ -233,6 +244,7 @@ string nav_right()
                "    <a href=\"/register\">注册</a>\n";
     }
     return "    <a href=\"/submissions\">我的提交</a>\n"
+           "    <a href=\"/rank\">排行榜</a>\n"
            "    <a href=\"/profile\">" +
            html_escape(nav_user) + "</a>\n"
                                    "    <a href=\"/logout\">退出</a>\n";
@@ -765,6 +777,211 @@ string render_submissions(const string &viewer, const string &filter_user)
     return page.str();
 }
 
+// 连 Redis：**带超时**。没超时的话 Redis 一挂，请求就挂在那里，"降级"无从谈起
+redisContext *redis_connect()
+{
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = REDIS_TIMEOUT_US;
+
+    redisContext *c = redisConnectWithTimeout("127.0.0.1", 6379, tv);
+    if (c == nullptr || c->err)
+    {
+        if (c != nullptr)
+        {
+            cerr << "redis connect failed: " << c->errstr << endl;
+            redisFree(c);
+        }
+        return nullptr;
+    }
+
+    redisSetTimeout(c, tv);
+    return c;
+}
+
+// 真来源：MySQL。成功返回 true 并填 rows
+bool rank_query_db(vector<pair<string, int>> &rows)
+{
+    rows.clear();
+
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    // 需求 OJ-RNK-01：同一用户同一题多次通过只算一次 → COUNT(DISTINCT problem_id)
+    // 老数据（username 或 problem_id 为 NULL）没法归属到「谁通过了哪题」，不计入
+    string sql = "SELECT username, COUNT(DISTINCT problem_id) AS solved "
+                 "FROM submissions "
+                 "WHERE verdict = 'AC' "
+                 "AND username IS NOT NULL AND problem_id IS NOT NULL "
+                 "GROUP BY username "
+                 "ORDER BY solved DESC, username ASC "
+                 "LIMIT 100";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "rank query failed: " << mysql_error(conn) << endl;
+        return false;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+    {
+        return false;
+    }
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res)) != nullptr)
+    {
+        rows.push_back({row[0] ? row[0] : "", row[1] ? atoi(row[1]) : 0});
+    }
+
+    mysql_free_result(res);
+    return true;
+}
+
+// 读缓存：true = 命中。Redis 任何问题都当"没有缓存"，绝不抛给页面
+bool rank_cache_get(vector<pair<string, int>> &rows)
+{
+    redisContext *c = redis_connect();
+    if (c == nullptr)
+    {
+        return false;
+    }
+
+    redisReply *r = (redisReply *)redisCommand(c, "GET %s", RANK_CACHE_KEY.c_str());
+    bool hit = false;
+
+    // 关键：只有 STRING 才算命中。NIL(4) = 没有缓存；
+    // 空串也是 STRING —— "缓存了一个空榜"和"没缓存"必须分得开
+    if (r != nullptr && r->type == REDIS_REPLY_STRING)
+    {
+        hit = true;
+        istringstream iss(string(r->str, r->len));
+        string line;
+        while (getline(iss, line))
+        {
+            size_t tab = line.find('\t');
+            if (tab == string::npos)
+            {
+                hit = false;
+                break;
+            }
+            try
+            {
+                rows.push_back({line.substr(0, tab), stoi(line.substr(tab + 1))});
+            }
+            catch (const exception &)
+            {
+                hit = false;
+                break;
+            }
+        }
+        if (!hit)
+        {
+            rows.clear();
+        }
+    }
+
+    if (r != nullptr)
+    {
+        freeReplyObject(r);
+    }
+    redisFree(c);
+    return hit;
+}
+
+// 写缓存：失败无所谓，页面已经能出数据了
+void rank_cache_set(const vector<pair<string, int>> &rows)
+{
+    string text;
+    for (const auto &row : rows)
+    {
+        text += row.first + "\t" + to_string(row.second) + "\n";
+    }
+
+    redisContext *c = redis_connect();
+    if (c == nullptr)
+    {
+        return;
+    }
+
+    redisReply *r = (redisReply *)redisCommand(c, "SETEX %s %d %b",
+                                               RANK_CACHE_KEY.c_str(),
+                                               RANK_CACHE_TTL,
+                                               text.data(), text.size());
+    if (r != nullptr)
+    {
+        freeReplyObject(r);
+    }
+    redisFree(c);
+}
+
+// 有新 AC 就作废缓存，下次访问重算。WA/TLE 不影响榜单，不删
+void rank_cache_invalidate()
+{
+    redisContext *c = redis_connect();
+    if (c == nullptr)
+    {
+        return;
+    }
+
+    redisReply *r = (redisReply *)redisCommand(c, "DEL %s", RANK_CACHE_KEY.c_str());
+    if (r != nullptr)
+    {
+        freeReplyObject(r);
+    }
+    redisFree(c);
+}
+
+string render_rank()
+{
+    vector<pair<string, int>> rows;
+    bool from_cache = rank_cache_get(rows);
+
+    if (!from_cache)
+    {
+        if (!rank_query_db(rows))
+        {
+            return page_head("排行榜") +
+                   "<p class=\"empty\">排行榜暂时读不出来。</p>\n" + page_tail();
+        }
+        rank_cache_set(rows);
+    }
+
+    stringstream page;
+    page << page_head("排行榜");
+    page << "<header class=\"page-head\"><h1>排行榜</h1>"
+            "<p class=\"lead\">按通过题数排名，同一道题通过多次只算一次。</p></header>\n";
+
+    // 标出来源 —— 演示「Redis 挂了会降级查库」时一眼能看见
+    page << "<p class=\"note\">数据来源："
+         << (from_cache ? "Redis 缓存" : "直接查数据库") << "</p>\n";
+
+    if (rows.empty())
+    {
+        page << "<p class=\"empty\">还没有人通过任何题目。</p>\n";
+    }
+    else
+    {
+        page << "<table class=\"sub-table\">\n"
+             << "<tr><th>名次</th><th>用户</th><th>通过题数</th></tr>\n";
+        for (size_t i = 0; i < rows.size(); i++)
+        {
+            page << "<tr><td>" << (i + 1) << "</td>"
+                 << "<td>" << html_escape(rows[i].first) << "</td>"
+                 << "<td>" << rows[i].second << "</td></tr>\n";
+        }
+        page << "</table>\n";
+    }
+
+    page << page_tail();
+    return page.str();
+}
+
+
 bool render_result(const string &job_id, string &html)
 {
     MYSQL *conn = get_conn();
@@ -994,6 +1211,12 @@ bool finish_job(const string &job_id, const string &result_text,
     {
         cerr << "finish_job failed: " << mysql_error(conn) << endl;
         return false;
+    }
+
+    // 榜单是派生数据：只有 AC 会改变「谁通过了哪题」，其它结论不碰缓存
+    if (verdict == "AC")
+    {
+        rank_cache_invalidate();
     }
     return true;
 }
@@ -1684,6 +1907,16 @@ void handle_request(int conn_fd, const string &req)
         send_response(conn_fd, 200,
                       render_submissions(current_user, filter_user),
                       "text/html; charset=utf-8");
+    }
+    // 排行榜
+    else if (path == "/rank")
+    {
+        if (current_user.empty())
+        {
+            send_redirect(conn_fd, "/login");
+            return;
+        }
+        send_response(conn_fd, 200, render_rank(), "text/html; charset=utf-8");
     }
     // 当前登录状态（调试用）
     else if (path == "/whoami")
