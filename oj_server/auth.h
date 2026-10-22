@@ -34,3 +34,9 @@ bool destroy_session(const std::string &session_id);
 
 // 从 cookie 头里取某个键的值，没有返回空串
 std::string cookie_value(const std::string &cookie_header, const std::string &name); // 从 cookie 头里取某个键的值，没有返回空串
+
+// 生成 werkzeug 格式的哈希，失败返回空串
+std::string make_password_hash(const std::string &password);
+
+// 去掉首尾空白
+std::string trim(const std::string &s);

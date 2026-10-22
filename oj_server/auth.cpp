@@ -10,6 +10,11 @@
 
 using namespace std;
 
+// 生成端用的参数，必须和校验端能认的格式一致
+constexpr long SCRYPT_N = 32768;
+constexpr long SCRYPT_R = 8;
+constexpr long SCRYPT_P = 1;
+
 vector<string> split(const string &s, char delim)
 {
     vector<string> out;
@@ -225,4 +230,52 @@ string cookie_value(const string &cookie_header, const string &name)
         }
     }
     return "";
+}
+
+string make_password_hash(const string &password)
+{
+    // werkzeug 的盐字符集
+    static const char *chars =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    thread_local random_device rd;
+
+    string salt;
+    for (int i = 0; i < 16; i++)
+    {
+        salt += chars[rd() % 62];
+    }
+
+    vector<unsigned char> out(64);
+    int rc = EVP_PBE_scrypt(password.data(), password.size(),
+                            (const unsigned char *)salt.data(), salt.size(),
+                            SCRYPT_N, SCRYPT_R, SCRYPT_P,
+                            132L * SCRYPT_N * SCRYPT_R * SCRYPT_P,
+                            out.data(), out.size());
+    if (rc != 1)
+    {
+        return "";
+    }
+
+    string hex;
+    hex.reserve(128);
+    for (unsigned char c : out)
+    {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", c);
+        hex += buf;
+    }
+
+    return "scrypt:" + to_string(SCRYPT_N) + ":" + to_string(SCRYPT_R) +
+           ":" + to_string(SCRYPT_P) + "$" + salt + "$" + hex;
+}
+
+string trim(const string &s)
+{
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == string::npos)
+    {
+        return "";
+    }
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
 }

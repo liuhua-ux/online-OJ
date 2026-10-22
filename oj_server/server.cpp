@@ -65,6 +65,9 @@ const map<string, string>
         {"", "application/octet-stream"},
 };
 
+// 渲染页面时要显示"谁在登录"。每个请求在同一个线程里跑完，所以 thread_local 够用。
+thread_local string nav_user;
+
 void send_response(int conn_fd, int code, const string &body, const string &content_type = "text/plain; charset=utf-8", const string &extra_headers = "")
 {
     string reason;
@@ -79,6 +82,10 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
     else if (code == 404)
     {
         reason = "Not Found";
+    }
+    else if (code == 403)
+    {
+        reason = "Forbidden";
     }
     else if (code == 500)
     {
@@ -218,6 +225,17 @@ string html_escape(const string &page)
     return out;
 }
 
+string nav_right()
+{
+    if (nav_user.empty())
+    {
+        return "    <a href=\"/login\">登录</a>\n"
+               "    <a href=\"/register\">注册</a>\n";
+    }
+    return "    <a href=\"/profile\">" + html_escape(nav_user) + "</a>\n"
+                                                                 "    <a href=\"/logout\">退出</a>\n";
+}
+
 string page_head(const string &title, const string &extra_head = "")
 {
     return "<!DOCTYPE html>\n"
@@ -238,16 +256,17 @@ string page_head(const string &title, const string &extra_head = "")
                                 "    <a href=\"/\">首页</a>\n"
                                 "    <a href=\"/problems\">题库</a>\n"
                                 "    <a href=\"/about.html\">关于</a>\n"
-                                "    <a href=\"/echo\">回显测试</a>\n"
-                                "  </nav>\n"
-                                "</header>\n"
-                                "<main class=\"wrap\">\n";
+                                "    <a href=\"/echo\">回显测试</a>\n" +
+           nav_right() +
+           "  </nav>\n"
+           "</header>\n"
+           "<main class=\"wrap\">\n";
 }
 
 string page_tail()
 {
     return "</main>\n"
-           "<footer class=\"foot\">二期 C++ 自研服务端：socket、epoll、线程池</footer>\n"
+           "<footer class=\"foot\">二期 C++ 自研服务端:socket、epoll、线程池</footer>\n"
            "</body>\n"
            "</html>\n";
 }
@@ -555,6 +574,55 @@ bool valid_job_id(const string &id)
 {
     return id.size() == 8 &&
            id.find_first_not_of("0123456789abcdef") == string::npos;
+}
+
+// 这条提交属于谁；找不到这条记录返回 false
+bool get_submission_owner(const string &job_id, string &owner)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+        return false;
+
+    string sql = "SELECT username FROM submissions WHERE job_id = '" +
+                 escape_sql(job_id) + "'";
+    if (mysql_query(conn, sql.c_str()) != 0)
+        return false;
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+        return false;
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    bool found = (row != nullptr);
+    if (found)
+    {
+        owner = (row[0] != nullptr) ? row[0] : ""; // 老数据是 NULL
+    }
+
+    mysql_free_result(res);
+    return found;
+}
+
+bool user_is_admin(const string &username)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+        return false;
+
+    string sql = "SELECT is_admin FROM users WHERE username = '" +
+                 escape_sql(username) + "'";
+    if (mysql_query(conn, sql.c_str()) != 0)
+        return false;
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+        return false;
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    bool admin = (row != nullptr && row[0] != nullptr && string(row[0]) == "1");
+
+    mysql_free_result(res);
+    return admin;
 }
 
 bool render_result(const string &job_id, string &html)
@@ -914,6 +982,15 @@ void handle_request(int conn_fd, const string &req)
     }
     cout << "session  = [" << session_id << "]" << endl;
 
+    string current_user;
+    if (!session_id.empty())
+    {
+        current_user = get_session_user(session_id);
+    }
+    cout << "user     = [" << current_user << "]" << endl;
+
+    nav_user = current_user;
+
     size_t body_need = 0;
     if (headers.count("content-length"))
     {
@@ -941,6 +1018,7 @@ void handle_request(int conn_fd, const string &req)
         cout << "粘包：多出 " << req.size() - total_len << " 字节，属于下一个请求（本步不处理）\n";
     }
 
+    // 首页
     if (target == "/")
     {
         ifstream f("www/index.html");
@@ -949,6 +1027,7 @@ void handle_request(int conn_fd, const string &req)
         string home = ss.str();
         send_response(conn_fd, 200, home, "text/html; charset=utf-8");
     }
+    // 回显页
     else if (target == "/echo")
     {
         if (method == "POST")
@@ -974,6 +1053,7 @@ void handle_request(int conn_fd, const string &req)
             send_response(conn_fd, 200, echo, "text/html; charset=utf-8");
         }
     }
+    // 题目详情
     else if (target.compare(0, PROBLEM_PREFIX.size(), PROBLEM_PREFIX) == 0)
     {
         string num = target.substr(PROBLEM_PREFIX.size());
@@ -994,8 +1074,15 @@ void handle_request(int conn_fd, const string &req)
         }
         send_response(conn_fd, 404, "请输入正确的网址\n");
     }
+    // 提交代码
     else if (method == "POST" && target.compare(0, SUBMIT_PREFIX.size(), SUBMIT_PREFIX) == 0)
     {
+        if (current_user.empty())
+        {
+            send_redirect(conn_fd, "/login");
+            return;
+        }
+
         string num = target.substr(SUBMIT_PREFIX.size());
         int problem_id = 0;
         bool ok_id = !num.empty() && num.find_first_not_of("0123456789") == string::npos;
@@ -1063,7 +1150,8 @@ void handle_request(int conn_fd, const string &req)
         string sql = "INSERT INTO submissions "
                      "(job_id, username, problem_id, status, result, created_at) "
                      "VALUES ('" +
-                     job_id + "', NULL, " + to_string(problem_id) +
+                     job_id + "', '" + escape_sql(current_user) + "', " +
+                     to_string(problem_id) +
                      ", '排队中', NULL, NOW())";
 
         if (mysql_query(conn, sql.c_str()) != 0)
@@ -1082,18 +1170,122 @@ void handle_request(int conn_fd, const string &req)
         cout << "入队 job_id=" << job_id << " problem=" << problem_id << endl;
         send_redirect(conn_fd, "/result/" + job_id);
     }
+    // 提交结果
     else if (target.compare(0, RESULT_PREFIX.size(), RESULT_PREFIX) == 0)
     {
-        string id = target.substr(RESULT_PREFIX.size());
-        string html;
+        if (current_user.empty())
+        {
+            send_redirect(conn_fd, "/login");
+            return;
+        }
 
-        if (!valid_job_id(id) || !render_result(id, html))
+        string id = target.substr(RESULT_PREFIX.size());
+
+        string owner;
+        if (!valid_job_id(id) || !get_submission_owner(id, owner))
+        {
+            send_response(conn_fd, 404, "没有这条提交\n");
+            return;
+        }
+
+        if (owner != current_user && !user_is_admin(current_user))
+        {
+            send_response(conn_fd, 403, "这不是你的提交\n");
+            return;
+        }
+
+        string html;
+        if (!render_result(id, html))
         {
             send_response(conn_fd, 404, "没有这条提交\n");
             return;
         }
         send_response(conn_fd, 200, html, "text/html; charset=utf-8");
     }
+    // 注册
+    else if (target == "/register")
+    {
+        if (method == "POST")
+        {
+            string username, password, password2;
+            if (form.count("username"))
+                username = trim(form["username"]);
+            if (form.count("password"))
+                password = form["password"];
+            if (form.count("password2"))
+                password2 = form["password2"];
+
+            if (username.empty() || password.empty())
+            {
+                send_response(conn_fd, 400, "用户名和密码都不能为空\n");
+                return;
+            }
+            if (password != password2)
+            {
+                send_response(conn_fd, 400, "两次输入的新密码不一样\n");
+                return;
+            }
+            if (username.size() > 32)
+            {
+                send_response(conn_fd, 400, "用户名最多 32 个字符\n");
+                return;
+            }
+
+            string hash = make_password_hash(password);
+            if (hash.empty())
+            {
+                send_response(conn_fd, 500, "注册失败，请重试\n");
+                return;
+            }
+
+            MYSQL *conn = get_conn();
+            if (conn == nullptr)
+            {
+                send_response(conn_fd, 500, "数据库暂时不可用\n");
+                return;
+            }
+
+            string sql = "INSERT INTO users (username, password_hash, created_at) "
+                         "VALUES ('" +
+                         escape_sql(username) + "', '" +
+                         escape_sql(hash) + "', NOW())";
+
+            if (mysql_query(conn, sql.c_str()) != 0)
+            {
+                // 1062 = 唯一键冲突，也就是用户名已经存在
+                if (mysql_errno(conn) == 1062)
+                {
+                    send_response(conn_fd, 200, "这个用户名已经被注册了\n");
+                }
+                else
+                {
+                    cerr << "register failed: " << mysql_error(conn) << endl;
+                    send_response(conn_fd, 500, "注册失败，请重试\n");
+                }
+                return;
+            }
+
+            send_redirect(conn_fd, "/login");
+            return;
+        }
+        else
+        {
+            stringstream page;
+            page << page_head("注册")
+                 << "<div class=\"form\">\n"
+                 << "<form method=\"POST\" action=\"/register\">\n"
+                 << "<p>用户名：<input name=\"username\" maxlength=\"32\"></p>\n"
+                 << "<p>密码：<input name=\"password\" type=\"password\"></p>\n"
+                 << "<p>再输一次：<input name=\"password2\" type=\"password\"></p>\n"
+                 << "<button type=\"submit\">注册</button>\n"
+                 << "</form>\n"
+                 << "<p class=\"note\">已经有账号了？<a href=\"/login\">去登录</a></p>\n"
+                 << "</div>\n"
+                 << page_tail();
+            send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
+        }
+    }
+    // 登录
     else if (target == "/login")
     {
         if (method == "POST")
@@ -1190,6 +1382,7 @@ void handle_request(int conn_fd, const string &req)
             send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
         }
     }
+    // 退出登录
     else if (target == "/logout")
     {
         if (!session_id.empty())
@@ -1200,10 +1393,121 @@ void handle_request(int conn_fd, const string &req)
         string cookie = "Set-Cookie: session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0\r\n";
         send_redirect(conn_fd, "/", cookie);
     }
+    // 个人中心
+    else if (target == "/profile")
+    {
+        if (current_user.empty())
+        {
+            send_redirect(conn_fd, "/login");
+            return;
+        }
+
+        if (method == "POST")
+        {
+            string old_pw, new_pw, new_pw2;
+            if (form.count("old_password"))
+                old_pw = form["old_password"];
+            if (form.count("new_password"))
+                new_pw = form["new_password"];
+            if (form.count("new_password2"))
+                new_pw2 = form["new_password2"];
+
+            if (old_pw.empty() || new_pw.empty())
+            {
+                send_response(conn_fd, 400, "三个框都要填\n");
+                return;
+            }
+            if (new_pw != new_pw2)
+            {
+                send_response(conn_fd, 400, "两次输入的新密码不一样\n");
+                return;
+            }
+
+            // 先查旧哈希
+            MYSQL *conn = get_conn();
+            if (conn == nullptr)
+            {
+                send_response(conn_fd, 500, "数据库暂时不可用\n");
+                return;
+            }
+
+            string sql = "SELECT password_hash FROM users WHERE username = '" +
+                         escape_sql(current_user) + "'";
+            if (mysql_query(conn, sql.c_str()) != 0)
+            {
+                send_response(conn_fd, 500, "数据库暂时不可用\n");
+                return;
+            }
+
+            MYSQL_RES *res = mysql_store_result(conn);
+            MYSQL_ROW row = (res != nullptr) ? mysql_fetch_row(res) : nullptr;
+
+            bool old_ok = (row != nullptr && row[0] != nullptr &&
+                           scrypt_verify(old_pw, row[0]));
+            if (res != nullptr)
+            {
+                mysql_free_result(res);
+            }
+
+            if (!old_ok)
+            {
+                send_response(conn_fd, 200, "原密码不对\n");
+                return;
+            }
+
+            // 生成新哈希并写回
+            string new_hash = make_password_hash(new_pw);
+            if (new_hash.empty())
+            {
+                send_response(conn_fd, 500, "修改失败，请重试\n");
+                return;
+            }
+
+            string up = "UPDATE users SET password_hash = '" +
+                        escape_sql(new_hash) + "' WHERE username = '" +
+                        escape_sql(current_user) + "'";
+            if (mysql_query(conn, up.c_str()) != 0)
+            {
+                cerr << "change password failed: " << mysql_error(conn) << endl;
+                send_response(conn_fd, 500, "修改失败，请重试\n");
+                return;
+            }
+
+            // 把这个人其它的会话都踢掉
+            string del = "DELETE FROM sessions WHERE username = '" + escape_sql(current_user) +
+                         "' AND session_id != '" + escape_sql(session_id) + "'";
+            mysql_query(conn, del.c_str());
+
+            send_response(conn_fd, 200, "密码已修改\n");
+            return;
+        }
+
+        stringstream page;
+        page << page_head("个人中心")
+             << "<h1>" << html_escape(current_user) << "</h1>\n"
+             << "<div class=\"form\">\n"
+             << "<form method=\"POST\" action=\"/profile\">\n"
+             << "<p>原密码：<input name=\"old_password\" type=\"password\"></p>\n"
+             << "<p>新密码：<input name=\"new_password\" type=\"password\"></p>\n"
+             << "<p>再输一次：<input name=\"new_password2\" type=\"password\"></p>\n"
+             << "<button type=\"submit\">修改密码</button>\n"
+             << "</form>\n"
+             << "</div>\n"
+             << page_tail();
+        send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
+    }
+    // 题库列表
     else if (target == "/problems")
     {
         send_response(conn_fd, 200, render_problems(), "text/html; charset=utf-8");
     }
+    // 当前登录状态（调试用）
+    else if (target == "/whoami")
+    {
+        send_response(conn_fd, 200,
+                      current_user.empty() ? "未登录\n" : current_user + "\n");
+    }
+    // 其余按静态文件处理
     else
     {
         target = urldecode(target, false);

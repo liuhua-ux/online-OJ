@@ -8,7 +8,7 @@
 
 ```
 cd ~/online-OJ/oj_server
-g++ -Wall -o server server.cpp
+g++ -Wall -o server server.cpp auth.cpp db.cpp $(mysql_config --cflags --libs) -lcrypto
 ./server                      # 监听 8080
 ```
 
@@ -22,6 +22,15 @@ g++ -Wall -o server server.cpp
 | `/` | 读 `www/index.html`，`text/html` |
 | `GET /echo` | 读 `www/echo.html`（表单页），`text/html` |
 | `POST /echo` | **现场拼**一页 HTML，把用户填的字塞进去 → 🔒 见决策 18–19 |
+| `GET /problems` | 从 MySQL 读已发布题目，列表页 |
+| `GET /problem/<id>` | 题目详情（含代码提交表单） |
+| `POST /submit/<id>` | **需登录** → 建临时目录、写文件、入库（带 `username`）、入判题队列 |
+| `GET /result/<job_id>` | **需登录 + 归属校验** → 本人或 admin 可看 |
+| `GET/POST /login` | 表单 / 校验 `scrypt` 后发会话 cookie |
+| `GET /logout` | 删会话 + 清 cookie |
+| `GET/POST /register` | 注册（重名靠唯一键 1062 识别） |
+| `GET/POST /profile` | 个人中心 / 改密（验旧密码、踢其它会话） |
+| `GET /whoami` | 调试用：返回当前用户名或「未登录」 |
 | `/<任意路径>` | **先 URL 解码**（决策 23）→ 读 `www/<该路径>`，按后缀推 `Content-Type`，读不到 → 404 |
 | 路径逃出 `www/` 之外 | **404**（🔒 见决策 13–17） |
 
@@ -1088,7 +1097,116 @@ thread j1(judge_worker), j2(judge_worker);               // 判题：2 个
 - **结果解析靠字符串抠** —— 判题器改一个字（比如 `time:` 变 `Time:`）整列就静默变 `NULL`。
   一期的 `parse_result()` 有同样的问题，这是同一个「协议靠格式约定」的代价。
 
-**下一步**：**登录 / 会话**（`/login` + 服务端 session），把 29h 前两条一起还掉。
+**下一步**：~~登录 / 会话~~ → 已走完，见 §30。
+
+### 30. ⭐ 登录 / 会话（2026-10-21 ~ 10-22，`07774a8` + `450d7ef` + 本步）
+
+把 §29h 的「无主提交、无归属校验」两条旧账一起还了，顺手补齐注册与改密。
+这一节基本是 CRUD 样板，值得记的只有几处**安全语义**。
+
+#### 30a. 存哈希：认 werkzeug 的格式，不自己另起炉灶
+
+库里原有用户是**一期 Flask** 注册的，`password_hash` 是 werkzeug 的格式：
+
+```
+scrypt:32768:8:1$<16 位盐>$<128 位十六进制>
+```
+
+所以二期**不引入新格式**，直接照这个格式生成和校验：
+
+- `parse_scrypt()` 把四段（`N:r:p`、盐、期望的 hex）拆出来；
+- `EVP_PBE_scrypt()` 现算，`CRYPTO_memcmp()` 做**常数时间比较** —— 普通 `==` 会按第一次不同的字节提前返回，理论上可被计时攻击。
+- 生成端 `make_password_hash()` 用同一组参数 `N=32768, r=8, p=1`（werkzeug 默认），盐从 62 个字母数字里取 16 位。
+
+**关键点：两期共用一张 `users` 表、一种哈希格式** —— 换了实现，账号还能登录。
+这就是 `CH-11`「功能不变、仅替换实现」在数据层的体现。
+
+#### 30b. 会话：票号存库，不是 JWT
+
+- 票号 = **32 位小写十六进制**（128 位随机），存 `sessions(session_id, username, created_at, expires_at)`。
+- 校验只看两件事：**票号在库里** + **`expires_at > NOW()`**。
+- 过期行不做后台清理，靠查询条件自然失效（课程尺度够用；量大了再加定时删）。
+- **为什么不用 JWT**：服务端 session 能**立刻作废**（`DELETE` 一行就下线），
+  改密后踢人、封号、管理员强制下线都靠这一条。JWT 没有黑名单就得等它自己过期。
+  Redis 那一步会把这张表搬过去（`SETEX` 天然带 TTL）。
+
+#### 30c. cookie 的三个属性
+
+```
+Set-Cookie: session=<32hex>; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400
+```
+
+| 属性 | 作用 |
+| --- | --- |
+| `HttpOnly` | JS 读不到 → XSS 偷不走票 |
+| `SameSite=Lax` | 别的站点的 POST 不带票 → **CSRF 的第一道（也是唯一一道）防线** |
+| `Max-Age` | 和服务端 `expires_at` **同一个常量** `SESSION_TTL_SECONDS`，两边不许各写各的 |
+
+解析 cookie 时 `split(';')` 之后要**去掉前导空格** —— 浏览器发的是 `a=1; b=2`。
+
+#### 30d. 路由守卫：一个入口，一个 `current_user`
+
+每个请求进来时先算一次：
+
+```cpp
+string current_user;
+if (!session_id.empty()) current_user = get_session_user(session_id);
+```
+
+然后：
+
+- `/submit/*`：`current_user.empty()` → **302 `/login`**。顺带把 `INSERT` 里恒为 `NULL` 的 `username` 填上 —— 提交终于有主了。
+- `/result/<job_id>`：先 `get_submission_owner()` 查归属，**本人或 admin** 才放行，否则 **403**。
+- `/profile`：未登录直接重定向。
+
+**`404` 和 `403` 的分工**：job_id 不存在 / 格式不对 → **404**（连「有没有这条」都不说）；
+存在但不是你的 → **403**（「这不是你的提交」）。一期 `FIX-11` 就是这么分的，二期对齐。
+
+#### 30e. 老数据的坑：`username IS NULL`
+
+守卫上线前提交的记录 `username` 是 `NULL`。`get_submission_owner()` 把它读成空串 ——
+于是这些记录的 owner 不等于任何用户名，**普通用户看不了，admin 能看**。这是有意的：
+无主数据不给普通用户碰，但管理员得能查。
+
+#### 30f. 注册：重名交给数据库，不先 `SELECT` 再 `INSERT`
+
+```sql
+INSERT INTO users (username, password_hash, created_at) VALUES (...)
+```
+
+失败时看 `mysql_errno(conn) == 1062`（唯一键冲突）→「这个用户名已经被注册了」。
+
+**「先查再插」有竞态**：两个同名请求同时查，都查不到，然后都去插 —— 一个成功一个报 1062。
+让**数据库的唯一键**当裁判，竞态天然消失；代码也少一次往返。
+
+#### 30g. 改密：验旧、换新、踢人
+
+顺序不能反：
+
+1. 先验 `old_password`（拿新哈希去比没意义，等于谁拿到 cookie 谁就能改密）；
+2. 写新哈希；
+3. `DELETE FROM sessions WHERE username=? AND session_id != ?` —— **踢掉其它设备**，留当前这条。
+   旧会话不删的话，偷到旧票的人仍然在线。
+
+#### 30h. `nav_user`：`thread_local` 在这里刚好对
+
+页面头部要显示「谁在登录」。导航由 `page_head()` 拼，它没有 `current_user` 参数，
+于是用一个 `thread_local string nav_user`，在 `handle_request()` 开头赋值。
+
+**为什么够用**：一个请求从解析到 `send_response` **始终在同一个工人线程里跑完**，中间不换线程。
+所以 `thread_local` 不会串到别的请求 —— 换成全局 `string` 就会（决策 27 的并发审法：
+**先问「这东西谁在碰」**）。
+
+#### 30i. 本步留下的缺口
+
+- ⚠️ **没有 CSRF token** —— 只靠 `SameSite=Lax`。它挡得住跨站表单，但挡不住同站 XSS 伪造。
+- ⚠️ **登录没有失败次数限制** —— 可以无限撞密码（scrypt 慢，但仍然能撞）。
+- ⚠️ **注册不校验密码强度 / 用户名可用字符** —— 只限了长度 ≤ 32。
+- ⚠️ **`/login` 已登录仍可访问** —— 没做「已登录就别再登录了」的重定向。
+- ⚠️ **每请求一次 `get_session_user()` 查询** —— 认证开销落在 MySQL 上；
+  后期要么加缓存，要么把会话搬 Redis（本来就要搬）。
+
+**下一步**：`/submissions`（我的提交列表）→ `/rank`（排行榜，Redis 第一次上场）。
 
 ## 实测数字汇总
 
@@ -1132,6 +1250,9 @@ thread j1(judge_worker), j2(judge_worker);               // 判题：2 个
 | 线程池：1 工人 + 同一条命令 | **4.019s**（= 加线程池之前的行为） |
 | 线程池：4 工人 + 无慢活 | **0.030s** |
 | 线程池：`ls /proc/<pid>/task \| wc -l` | **5**（4 工人 + 1 主线程） |
+| 登录 POST（scrypt `N=32768`） | **0.128 / 0.140 / 0.150 s**；同期 `/problems` 只有 **1~9 ms** |
+| 认证冒烟（2026-10-22） | 未登录 `/submit`、`/result` → **302 `/login`**；注册成功 → **302 `/login`**；重名 → **200**「已被注册」 |
+| 越权三者 | 本人 `/result` **200** / 他人 **403** / 不存在 **404** |
 
 **队头阻塞复现**（第 ③ 步的动机，一次成功）：
 
@@ -1205,10 +1326,10 @@ server(pid 2445554) 手上只有一条连接：127.0.0.1:43456   Recv-Q 0     �
 - ⚠️ **`worker()` 里没有 `try/catch`**：`handle_request` 抛异常（如 `stoi`）→ `std::terminate` → **整个进程死**。
   和线程池之前**结果一样**（不是本步引入），但值得记 —— 一期 Flask 那个「没 except，工人线程静默死掉」
   是同一课的 Python 版。
-- ⚠️ **`submissions.username` 恒为 `NULL`**：C++ 侧**没有任何登录/会话代码**（决策 29 的第 1 条选择）。
-  提交不知道是谁的，`/submissions`、`/rank` 都做不了。**下一站补。**
-- ⚠️ **`/result/<job_id>` 无归属校验**：知道提交号就能看别人的。一期 `FIX-11` 已解决（越权 403），
-  **二期这里是实打实的退步**，登录到位后必须补回来。
+- ~~**`submissions.username` 恒为 `NULL`**~~ —— ✅ **已修**（§30d）：登录后提交写入 `current_user`。
+  守卫上线前的**老记录仍是 `NULL`**，按「无主数据」处理（普通用户看不了，admin 能看，§30e）。
+- ~~**`/result/<job_id>` 无归属校验**~~ —— ✅ **已补**（§30d）：本人或 admin 才放行，越权 **403**，
+  和一期 `FIX-11` 对齐。
 - ⚠️ **判题数据目录硬编码**：`/home/ubuntu/online-OJ/judge_demo/testdata/<题号>`，换机器要改代码。
 
 ## 下一步
@@ -1237,11 +1358,11 @@ server(pid 2445554) 手上只有一条连接：127.0.0.1:43456   Recv-Q 0     �
 - ~~**接 MySQL**~~ —— ✅ **已完成**（**决策 28**）：`/problems` 从库读题渲染、`thread_local` 每线程一条连接（57ms → 1ms）
 - ~~**接判题器**~~ —— ✅ **已完成**（**决策 29**，`694f772` → `eaff82d`）。
   提交 → 入队 → 判题 → 落库 → `/result/<job_id>` 自动刷新，**主干道打通**。
-- 队伍最前面 = **登录 / 会话**（`/login` + 服务端 session）。
-  解锁三样：提交归属（`username` 不再恒 `NULL`）、`/result` 越权校验（一期 `FIX-11` 的二期版）、
-  后面的 `/submissions` 与 `/rank`。
-  子步计划：① scrypt 校验（`EVP_PBE_scrypt`，兼容库里 werkzeug 的 `scrypt:...`）② `sessions` 表 + `POST /login`
-  ③ 路由守卫 ④ `/register` / `/logout` / 改密。
+- ~~**登录 / 会话**~~ —— ✅ **已完成**（**决策 30**，`07774a8` → `450d7ef` + 本步）。
+  ① scrypt 校验 ② `sessions` 表 + `POST /login` ③ 路由守卫 + 提交归属 + `/result` 越权 403
+  ④ `/register` / `/logout` / 改密 —— **四个子步全齐**。
+- 队列最前面 = **`/submissions`（我的提交列表）** → **`/rank`（排行榜，Redis 第一次上场）**。
+  两者都依赖本步的 `submissions.username`，现在数据已经齐了。
 
 ## 待做的对照实验
 
