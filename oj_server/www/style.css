@@ -537,6 +537,42 @@ button:hover, .btn:hover {
 }
 @keyframes pulse { 50% { opacity: .2; } }
 
+/* ===== 提交记录表 ===== */
+.filter { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 0 0 18px; }
+.filter input {
+  width: 220px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+.filter .note { margin: 0; }
+
+.sub-table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+.sub-table th {
+  padding: 11px 14px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--blue-soft);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.sub-table td { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.sub-table tr:last-child td { border-bottom: none; }
+.sub-table tr:hover td { background: var(--blue-soft); }
+.sub-table td a { font-family: var(--mono); }
+
 /* ===== 杂项 ===== */
 .foot {
   padding: 30px 24px 34px;
@@ -574,6 +610,9 @@ button:hover, .btn:hover {
 
   .problem-row { grid-template-columns: 44px 1fr; gap: 6px 12px; }
   .problem-meta { grid-column: 2; }
+
+  .sub-table { display: block; overflow-x: auto; white-space: nowrap; font-size: 13px; }
+  .filter input { width: 100%; }
 
   .page-head { padding-top: 34px; }
   h1 { font-size: 29px; }

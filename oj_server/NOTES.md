@@ -25,7 +25,8 @@ g++ -Wall -o server server.cpp auth.cpp db.cpp $(mysql_config --cflags --libs) -
 | `GET /problems` | 从 MySQL 读已发布题目，列表页 |
 | `GET /problem/<id>` | 题目详情（含代码提交表单） |
 | `POST /submit/<id>` | **需登录** → 建临时目录、写文件、入库（带 `username`）、入判题队列 |
-| `GET /result/<job_id>` | **需登录 + 归属校验** → 本人或 admin 可看 |
+| `GET /result/<job_id>` | **需登录 + 归属校验** → 本人或 admin 可看；含**提交的源码** |
+| `GET /submissions` | **需登录**：学生只看本人，admin 看全部、可 `?user=` 筛选，倒序 `LIMIT 100` |
 | `GET/POST /login` | 表单 / 校验 `scrypt` 后发会话 cookie |
 | `GET /logout` | 删会话 + 清 cookie |
 | `GET/POST /register` | 注册（重名靠唯一键 1062 识别） |
@@ -1206,7 +1207,116 @@ INSERT INTO users (username, password_hash, created_at) VALUES (...)
 - ⚠️ **每请求一次 `get_session_user()` 查询** —— 认证开销落在 MySQL 上；
   后期要么加缓存，要么把会话搬 Redis（本来就要搬）。
 
-**下一步**：`/submissions`（我的提交列表）→ `/rank`（排行榜，Redis 第一次上场）。
+**下一步**：~~`/submissions`~~ → 已走完，见 §31。
+
+### 31. 我的提交列表 + 源码保存（2026-10-22，`66627af` 之后）
+
+需求对应：`OJ-REC-02`（历史提交列表）+ `OJ-REC-01`（结果页展示源码，原先因为源码没落库一直是 ☆）。
+
+#### 31a. 查询串拆分：`path` 和 `query` 必须分开
+
+原来路由是 `target == "/problems"` 这种**精确比较**，一加 `/submissions?user=alice` 直接 404（`target` 里带着 `?user=alice`）。所以请求行解析完先拆：
+
+```cpp
+size_t qpos = target.find('?');
+string path  = target.substr(0, qpos);                     // npos 时 substr(0,npos) = 整串
+string query = (qpos == string::npos) ? "" : target.substr(qpos + 1);
+```
+
+- **下游所有路由比较、「`www` + path」、`urldecode` 都改用 `path`**。
+- ⚠️ **不能写无条件版本**：`npos + 1` 在 `size_t` 里**回绕成 0**，`substr(0)` 返回**整个 target** ——
+  不抛异常、不崩溃，`query` 静悄悄变成 `"/problems"`。**「静默地给错值」比崩溃难查得多。**
+
+#### 31b. 查询串直接复用 `parse_form()`
+
+`parse_form()` 本来就是「按 `&` 切、按 `=` 切、两端 URL 解码」，跟查询串的语法完全一致，
+连 `+` 解码成空格的那个开关都正好对（决策 23）。
+
+```cpp
+map<string, string> query_params = parse_form(query);
+```
+
+#### 31c. 列表 SQL：`LEFT JOIN` + 双排序键 + `LIMIT`
+
+```sql
+SELECT s.job_id, s.username, s.problem_id, p.title, s.status, s.created_at
+FROM submissions s LEFT JOIN problems p ON s.problem_id = p.problem_id
+[WHERE ...]
+ORDER BY s.created_at DESC, s.job_id DESC
+LIMIT 100
+```
+
+- **`LEFT JOIN` 不是 `INNER JOIN`**：17 条提交里有 **9 条 `problem_id IS NULL`**，
+  `INNER JOIN` 会**安安静静少给 9 行**（跟一期那次 10 条少 9 条是同一课）。
+- **第二排序键**：`created_at` 只有秒级精度，同一秒多条顺序不确定（`FIX-16` 的缓解，不是根治）。
+- **`LIMIT 100` 是硬上限**，没做翻页。需求里翻页是「（可选）」。
+
+#### 31d. 权限：`WHERE` 由 `admin` 决定，不认参数
+
+```cpp
+if (!admin)                     where = " WHERE s.username = '" + escape_sql(viewer) + "'";
+else if (!filter_user.empty())  where = " WHERE s.username = '" + escape_sql(filter_user) + "'";
+```
+
+**学生传 `?user=testuser` 也只看得到自己的** —— 分支看的是「你是不是管理员」，**不是「参数里写了谁」**。
+实测：学生带该参数 → **0 行**，标题仍是「我的提交」。
+
+#### 31e. 两个 NULL 各说各话
+
+| NULL 在哪 | 页面上 |
+| --- | --- |
+| `username` 为 NULL | 提交者显示「游客」（这一列引入前的历史数据） |
+| `problem_id` 为 NULL | 题目显示「（老数据·无题号）」 |
+
+两者**不是一回事**：有 3 条记录 `username` 有值但 `problem_id` 是 NULL（那一列更晚才加）。
+实测共 **6 个「游客」+ 9 条「无题号」**，页面没把这两种 NULL 混成一个。
+
+#### 31f. 源码落库：`submissions.source MEDIUMTEXT`
+
+**动机不是"顺便"** —— 是用户在实际使用中撞出来的：提交完判完，回题目页一看**刚才写的代码全没了**。
+根因是题目页的 `<textarea>` 永远是空的（`render_problem()` 根本不查历史），
+能不能恢复全看浏览器愿不愿意帮你留表单状态 —— **真实 OJ 不赌浏览器**。
+
+三件事：
+
+1. **提交时存**：`INSERT` 多一列 `source`，值用 `escape_sql(code)`（代码里的引号、反斜杠是常态）。
+2. **题目页预填**：`render_problem(problem_id, viewer, html)` 先查
+   `WHERE username = viewer AND problem_id = N ORDER BY created_at DESC, job_id DESC LIMIT 1`，
+   取**最近一次**（不论判得对不对）填进 textarea，**`html_escape` 之后**再填。
+3. **结果页展示**：`/result` 读取 `source` 显示在 `<pre class="result-output">`；
+   老数据（NULL）显示「（老数据·无源码）」；**判题没完也显示**（交上去的是哪份，先让人看见）。
+
+**两个实现坑**：
+
+- ⚠️ **同一条 MySQL 连接上，结果集没 `mysql_free_result` 之前不能发下一条查询** ——
+  否则报 `Commands out of sync`，而且这条错误**报在下一条命令上**，极难查。
+  所以「查上次源码」放在**查题目之前**（那时连接是干净的），而不是图省事塞在后面。
+- ⚠️ **函数声明的取舍**：`render_problem` 定义在调用之前 → 不需要前置声明；
+  `handle_request` 定义在 `worker()` 之后 → **必须有**。删声明时把两条一起删，编译立刻报
+  `'handle_request' was not declared in this scope`。
+
+#### 31g. 实测（2026-10-22）
+
+| 项 | 结果 |
+| --- | --- |
+| `?` 拆分回归 | `/problems?x=1`、`/problem/1?from=rank`、`/style.css?v=2` 全 **200**（改前 404） |
+| 列表（admin） | **17 行**；`?user=alice` → **1 行** |
+| 学生越权筛选 | `?user=testuser` → **0 行** |
+| 倒序 | 新提交排第一 |
+| 空状态 | 200 +「还没有提交记录」 |
+| 转义 | `?user=<b>x</b>` → `&lt;b&gt;x&lt;/b&gt;` |
+| 源码入库 | 提交 130 字节（含 `'` `"` `\` 中文换行）→ 库里 **130 字节，`cmp` 逐字节相同** |
+| 题目页预填 | 回题目页取回同一份 **130 字节**；交第二次后取到**最新**那份；他人/未登录为空 |
+| 结果页源码 | 130 字节逐字节相同；老提交显示「（老数据·无源码）」 |
+
+#### 31h. 本步留下的缺口
+
+- ⚠️ **`LIMIT 100` 没实测**（要造 101 条才能看见截断），只核了 SQL。
+- ⚠️ **列表没有翻页**；`created_at` 秒级精度导致同秒排序只能靠 `job_id` 兜底（`FIX-16`）。
+- ⚠️ **源码无长度上限** —— `MEDIUMTEXT` 能装 16MB，但没有任何提交前检查。
+- ⚠️ **需求 `OJ-REC-01` 的「是否对他人可见可配置」没做** —— 目前固定：本人 + 管理员可见。
+
+**下一步**：`/rank`（排行榜，Redis 第一次上场）。
 
 ## 实测数字汇总
 
@@ -1253,6 +1363,12 @@ INSERT INTO users (username, password_hash, created_at) VALUES (...)
 | 登录 POST（scrypt `N=32768`） | **0.128 / 0.140 / 0.150 s**；同期 `/problems` 只有 **1~9 ms** |
 | 认证冒烟（2026-10-22） | 未登录 `/submit`、`/result` → **302 `/login`**；注册成功 → **302 `/login`**；重名 → **200**「已被注册」 |
 | 越权三者 | 本人 `/result` **200** / 他人 **403** / 不存在 **404** |
+| **查询串拆分后回归** | `/problems?x=1`、`/problem/1?from=rank`、`/style.css?v=2` 全 **200**（改前 **404**） |
+| `/submissions`（admin） | **17 行**；`?user=alice` → **1 行**；学生带 `?user=testuser` → **0 行** |
+| 列表里的 NULL | **6 个「游客」** + **9 条「（老数据·无题号）」**（两种 NULL 各显示各的） |
+| 源码入库 | 提交 **130 字节**（含 `'` `"` `\` 中文）→ 库里 **130 字节，`cmp` 逐字节相同** |
+| 题目页预填 | 回题目页取回 **130 字节**逐字节相同；交第二次取到**最新**；他人/未登录为空 |
+| 结果页源码 | **130 字节**逐字节相同；老提交 `03eec3f0` 显示「（老数据·无源码）」 |
 
 **队头阻塞复现**（第 ③ 步的动机，一次成功）：
 
@@ -1361,8 +1477,9 @@ server(pid 2445554) 手上只有一条连接：127.0.0.1:43456   Recv-Q 0     �
 - ~~**登录 / 会话**~~ —— ✅ **已完成**（**决策 30**，`07774a8` → `450d7ef` + 本步）。
   ① scrypt 校验 ② `sessions` 表 + `POST /login` ③ 路由守卫 + 提交归属 + `/result` 越权 403
   ④ `/register` / `/logout` / 改密 —— **四个子步全齐**。
-- 队列最前面 = **`/submissions`（我的提交列表）** → **`/rank`（排行榜，Redis 第一次上场）**。
-  两者都依赖本步的 `submissions.username`，现在数据已经齐了。
+- ~~**`/submissions`（我的提交列表）**~~ —— ✅ **已完成**（**决策 31**）。
+  顺带把 `submissions.source` 落库，题目页预填 + 结果页展示 —— **`OJ-REC-01` 的「源码展示」缺口在二期补上了**。
+- 队列最前面 = **`/rank`（排行榜，Redis 第一次上场）**。
 
 ## 待做的对照实验
 

@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS submissions (
     total       INT          NULL,   -- 共几组
     time_ms     INT          NULL,   -- 最慢那一组的耗时（毫秒）
     memory_kb   INT          NULL,   -- 各组峰值内存里的最大值（KB）
+    source      MEDIUMTEXT   NULL,   -- 提交的源码；老数据为 NULL（2026-10-22 起保存）
     PRIMARY KEY (job_id),
     CONSTRAINT fk_submission_problem FOREIGN KEY (problem_id)
         REFERENCES problems(problem_id)

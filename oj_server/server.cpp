@@ -232,8 +232,10 @@ string nav_right()
         return "    <a href=\"/login\">登录</a>\n"
                "    <a href=\"/register\">注册</a>\n";
     }
-    return "    <a href=\"/profile\">" + html_escape(nav_user) + "</a>\n"
-                                                                 "    <a href=\"/logout\">退出</a>\n";
+    return "    <a href=\"/submissions\">我的提交</a>\n"
+           "    <a href=\"/profile\">" +
+           html_escape(nav_user) + "</a>\n"
+                                   "    <a href=\"/logout\">退出</a>\n";
 }
 
 string page_head(const string &title, const string &extra_head = "")
@@ -271,18 +273,20 @@ string page_tail()
            "</html>\n";
 }
 
-string render_submit_form(int problem_id)
+string render_submit_form(int problem_id, const string &last_source)
 {
     return "<h2>提交代码</h2>\n"
            "<form class=\"editor\" method=\"POST\" action=\"/submit/" +
            to_string(problem_id) + "\">\n"
                                    "  <div class=\"editor-bar\"><span class=\"dot\" aria-hidden=\"true\"></span><span>submission.cpp</span><span class=\"lang\">C++17</span></div>\n"
-                                   "  <textarea name=\"code\" spellcheck=\"false\" placeholder=\"在这里粘贴你的 C++ 代码\"></textarea>\n"
-                                   "  <div class=\"editor-foot\">\n"
-                                   "    <button type=\"submit\">提交判题</button>\n"
-                                   "    <span class=\"hint\">提交后在后台编译、运行、比对</span>\n"
-                                   "  </div>\n"
-                                   "</form>\n";
+                                   "  <textarea name=\"code\" spellcheck=\"false\" placeholder=\"在这里粘贴你的 C++ 代码\">" +
+           html_escape(last_source) +
+           "</textarea>\n"
+           "  <div class=\"editor-foot\">\n"
+           "    <button type=\"submit\">提交判题</button>\n"
+           "    <span class=\"hint\">提交后在后台编译、运行、比对</span>\n"
+           "  </div>\n"
+           "</form>\n";
 }
 
 size_t request_total_len(const string &req)
@@ -489,12 +493,35 @@ string render_problems()
     return page.str();
 }
 
-bool render_problem(int problem_id, string &html)
+bool render_problem(int problem_id, const string &viewer, string &html)
 {
     MYSQL *conn = get_conn();
     if (conn == nullptr)
     {
         return false;
+    }
+
+    // 这个人上次交这道题的源码（没登录就查不了，也不该查）
+    string last_source;
+    if (!viewer.empty())
+    {
+        string q = "SELECT source FROM submissions WHERE username = '" +
+                   escape_sql(viewer) + "' AND problem_id = " +
+                   to_string(problem_id) +
+                   " ORDER BY created_at DESC, job_id DESC LIMIT 1";
+        if (mysql_query(conn, q.c_str()) == 0)
+        {
+            MYSQL_RES *sr = mysql_store_result(conn);
+            MYSQL_ROW srow = (sr != nullptr) ? mysql_fetch_row(sr) : nullptr;
+            if (srow != nullptr && srow[0] != nullptr)
+            {
+                last_source = srow[0];
+            }
+            if (sr != nullptr)
+            {
+                mysql_free_result(sr);
+            }
+        }
     }
 
     string sql = "SELECT title, description, input_format, output_format, "
@@ -548,7 +575,7 @@ bool render_problem(int problem_id, string &html)
     page << "<h2>样例输出</h2>\n";
     page << "<pre>" << html_escape(row[5]) << "</pre>\n";
 
-    page << render_submit_form(problem_id);
+    page << render_submit_form(problem_id, last_source);
     page << "</div>\n";
     page << page_tail();
 
@@ -625,6 +652,119 @@ bool user_is_admin(const string &username)
     return admin;
 }
 
+string render_submissions(const string &viewer, const string &filter_user)
+{
+    bool admin = user_is_admin(viewer);
+
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return page_head("我的提交") +
+               "<p class=\"empty\">数据库暂时不可用。</p>\n" + page_tail();
+    }
+
+    // 学生：只查本人，?user= 传什么都没用
+    // 管理员：不填就查全部，填了就按用户名筛
+    string where;
+    if (!admin)
+    {
+        where = " WHERE s.username = '" + escape_sql(viewer) + "'";
+    }
+    else if (!filter_user.empty())
+    {
+        where = " WHERE s.username = '" + escape_sql(filter_user) + "'";
+    }
+
+    string sql = "SELECT s.job_id, s.username, s.problem_id, p.title, s.status, s.created_at "
+                 "FROM submissions s LEFT JOIN problems p "
+                 "ON s.problem_id = p.problem_id" +
+                 where +
+                 " ORDER BY s.created_at DESC, s.job_id DESC LIMIT 100";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "submissions query failed: " << mysql_error(conn) << endl;
+        return page_head("我的提交") +
+               "<p class=\"empty\">提交记录暂时读不出来。</p>\n" + page_tail();
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+    {
+        return page_head("我的提交") +
+               "<p class=\"empty\">提交记录暂时读不出来。</p>\n" + page_tail();
+    }
+
+    string title;
+    if (!admin)
+        title = "我的提交";
+    else if (filter_user.empty())
+        title = "全部提交记录";
+    else
+        title = filter_user + " 的提交";
+
+    stringstream page;
+    page << page_head("提交记录");
+    page << "<header class=\"page-head\"><h1>" << html_escape(title)
+         << "</h1></header>\n";
+
+    // 管理员的筛选框：GET 只读，不写数据
+    if (admin)
+    {
+        page << "<form class=\"filter\" method=\"GET\" action=\"/submissions\">\n"
+             << "<input name=\"user\" value=\"" << html_escape(filter_user)
+             << "\" placeholder=\"按用户名筛选\">\n"
+             << "<button type=\"submit\">筛选</button>\n"
+             << "<a class=\"note\" href=\"/submissions\">看全部</a>\n"
+             << "</form>\n";
+    }
+
+    int count = 0;
+    page << "<table class=\"sub-table\">\n"
+         << "<tr><th>提交号</th><th>题目</th><th>提交者</th>"
+            "<th>状态</th><th>提交时间</th></tr>\n";
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res)) != nullptr)
+    {
+        string job_id = (row[0] != nullptr) ? row[0] : "";
+        string who = (row[1] != nullptr) ? row[1] : "游客";
+
+        string prob;
+        if (row[2] != nullptr)
+        {
+            prob = "第 " + string(row[2]) + " 题 " +
+                   ((row[3] != nullptr) ? row[3] : "");
+        }
+        else
+        {
+            prob = "（老数据·无题号）";
+        }
+
+        string status = (row[4] != nullptr) ? row[4] : "";
+        string created = (row[5] != nullptr) ? row[5] : "";
+
+        page << "<tr>"
+             << "<td><a href=\"/result/" << html_escape(job_id) << "\">"
+             << html_escape(job_id) << "</a></td>"
+             << "<td>" << html_escape(prob) << "</td>"
+             << "<td>" << html_escape(who) << "</td>"
+             << "<td>" << html_escape(status) << "</td>"
+             << "<td>" << html_escape(created) << "</td>"
+             << "</tr>\n";
+        count++;
+    }
+    mysql_free_result(res);
+
+    page << "</table>\n";
+    if (count == 0)
+    {
+        page << "<p class=\"empty\">还没有提交记录。</p>\n";
+    }
+    page << page_tail();
+    return page.str();
+}
+
 bool render_result(const string &job_id, string &html)
 {
     MYSQL *conn = get_conn();
@@ -634,7 +774,7 @@ bool render_result(const string &job_id, string &html)
     }
 
     string sql = "SELECT status, verdict, passed, total, time_ms, "
-                 "memory_kb, result, problem_id, created_at "
+                 "memory_kb, result, problem_id, created_at, source "
                  "FROM submissions WHERE job_id = '" +
                  job_id + "'";
 
@@ -666,6 +806,7 @@ bool render_result(const string &job_id, string &html)
     string raw = cell(row[6]);
     string prob_id = cell(row[7]);
     string created = cell(row[8]);
+    string source = cell(row[9]);
 
     bool finished = (status == "完成");
 
@@ -704,6 +845,16 @@ bool render_result(const string &job_id, string &html)
                  verdict == "MLE" || verdict == "NO_DATA" || verdict == "SE")
         {
             cls = "verdict-err";
+        }
+
+        page << "<h2>提交的源码</h2>\n";
+        if (source.empty())
+        {
+            page << "<p class=\"empty\">（老数据·无源码）</p>\n";
+        }
+        else
+        {
+            page << "<pre class=\"result-output\">" << html_escape(source) << "</pre>\n";
         }
 
         page << "<section class=\"result-card\">\n";
@@ -932,7 +1083,20 @@ void handle_request(int conn_fd, const string &req)
     size_t head_end = req.find("\r\n\r\n");
     istringstream iss(req);
     string method, target, version;
+    string path, query;
     iss >> method >> target >> version;
+
+    size_t qpos = target.find('?');
+    if (qpos != string::npos)
+    {
+        path = target.substr(0, qpos);
+        query = target.substr(qpos + 1);
+    }
+    else
+    {
+        path = target;
+        query = "";
+    }
     cout << "method  = " << method << endl;
     cout << "target  = " << target << endl;
     cout << "version = " << version << endl;
@@ -1007,6 +1171,7 @@ void handle_request(int conn_fd, const string &req)
 
     string body = req.substr(head_end + 4, body_need);
     map<string, string> form = parse_form(body);
+    map<string, string> query_params = parse_form(query);
     for (const auto &kv : form)
     {
         cout << "form: " << kv.first << " = " << kv.second << "\n";
@@ -1019,7 +1184,7 @@ void handle_request(int conn_fd, const string &req)
     }
 
     // 首页
-    if (target == "/")
+    if (path == "/")
     {
         ifstream f("www/index.html");
         stringstream ss;
@@ -1028,7 +1193,7 @@ void handle_request(int conn_fd, const string &req)
         send_response(conn_fd, 200, home, "text/html; charset=utf-8");
     }
     // 回显页
-    else if (target == "/echo")
+    else if (path == "/echo")
     {
         if (method == "POST")
         {
@@ -1054,15 +1219,15 @@ void handle_request(int conn_fd, const string &req)
         }
     }
     // 题目详情
-    else if (target.compare(0, PROBLEM_PREFIX.size(), PROBLEM_PREFIX) == 0)
+    else if (path.compare(0, PROBLEM_PREFIX.size(), PROBLEM_PREFIX) == 0)
     {
-        string num = target.substr(PROBLEM_PREFIX.size());
+        string num = path.substr(PROBLEM_PREFIX.size());
         string html;
         if (!num.empty() && num.find_first_not_of("0123456789") == string::npos)
         {
             try
             {
-                if (render_problem(stoi(num), html))
+                if (render_problem(stoi(num), current_user, html))
                 {
                     send_response(conn_fd, 200, html, "text/html; charset=utf-8");
                     return;
@@ -1075,7 +1240,7 @@ void handle_request(int conn_fd, const string &req)
         send_response(conn_fd, 404, "请输入正确的网址\n");
     }
     // 提交代码
-    else if (method == "POST" && target.compare(0, SUBMIT_PREFIX.size(), SUBMIT_PREFIX) == 0)
+    else if (method == "POST" && path.compare(0, SUBMIT_PREFIX.size(), SUBMIT_PREFIX) == 0)
     {
         if (current_user.empty())
         {
@@ -1083,7 +1248,7 @@ void handle_request(int conn_fd, const string &req)
             return;
         }
 
-        string num = target.substr(SUBMIT_PREFIX.size());
+        string num = path.substr(SUBMIT_PREFIX.size());
         int problem_id = 0;
         bool ok_id = !num.empty() && num.find_first_not_of("0123456789") == string::npos;
 
@@ -1148,11 +1313,11 @@ void handle_request(int conn_fd, const string &req)
         }
 
         string sql = "INSERT INTO submissions "
-                     "(job_id, username, problem_id, status, result, created_at) "
+                     "(job_id, username, problem_id, status, result, source, created_at) "
                      "VALUES ('" +
                      job_id + "', '" + escape_sql(current_user) + "', " +
                      to_string(problem_id) +
-                     ", '排队中', NULL, NOW())";
+                     ", '排队中', NULL, '" + escape_sql(code) + "', NOW())";
 
         if (mysql_query(conn, sql.c_str()) != 0)
         {
@@ -1171,7 +1336,7 @@ void handle_request(int conn_fd, const string &req)
         send_redirect(conn_fd, "/result/" + job_id);
     }
     // 提交结果
-    else if (target.compare(0, RESULT_PREFIX.size(), RESULT_PREFIX) == 0)
+    else if (path.compare(0, RESULT_PREFIX.size(), RESULT_PREFIX) == 0)
     {
         if (current_user.empty())
         {
@@ -1179,7 +1344,7 @@ void handle_request(int conn_fd, const string &req)
             return;
         }
 
-        string id = target.substr(RESULT_PREFIX.size());
+        string id = path.substr(RESULT_PREFIX.size());
 
         string owner;
         if (!valid_job_id(id) || !get_submission_owner(id, owner))
@@ -1203,7 +1368,7 @@ void handle_request(int conn_fd, const string &req)
         send_response(conn_fd, 200, html, "text/html; charset=utf-8");
     }
     // 注册
-    else if (target == "/register")
+    else if (path == "/register")
     {
         if (method == "POST")
         {
@@ -1286,7 +1451,7 @@ void handle_request(int conn_fd, const string &req)
         }
     }
     // 登录
-    else if (target == "/login")
+    else if (path == "/login")
     {
         if (method == "POST")
         {
@@ -1383,7 +1548,7 @@ void handle_request(int conn_fd, const string &req)
         }
     }
     // 退出登录
-    else if (target == "/logout")
+    else if (path == "/logout")
     {
         if (!session_id.empty())
         {
@@ -1394,7 +1559,7 @@ void handle_request(int conn_fd, const string &req)
         send_redirect(conn_fd, "/", cookie);
     }
     // 个人中心
-    else if (target == "/profile")
+    else if (path == "/profile")
     {
         if (current_user.empty())
         {
@@ -1497,12 +1662,31 @@ void handle_request(int conn_fd, const string &req)
         send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
     }
     // 题库列表
-    else if (target == "/problems")
+    else if (path == "/problems")
     {
         send_response(conn_fd, 200, render_problems(), "text/html; charset=utf-8");
     }
+    // 我的提交
+    else if (path == "/submissions")
+    {
+        if (current_user.empty())
+        {
+            send_redirect(conn_fd, "/login");
+            return;
+        }
+
+        string filter_user;
+        if (query_params.count("user"))
+        {
+            filter_user = trim(query_params["user"]);
+        }
+
+        send_response(conn_fd, 200,
+                      render_submissions(current_user, filter_user),
+                      "text/html; charset=utf-8");
+    }
     // 当前登录状态（调试用）
-    else if (target == "/whoami")
+    else if (path == "/whoami")
     {
         send_response(conn_fd, 200,
                       current_user.empty() ? "未登录\n" : current_user + "\n");
@@ -1510,8 +1694,8 @@ void handle_request(int conn_fd, const string &req)
     // 其余按静态文件处理
     else
     {
-        target = urldecode(target, false);
-        string road = "www" + target;
+        path = urldecode(path, false);
+        string road = "www" + path;
 
         char root_buf[PATH_MAX];
         char full_buf[PATH_MAX];
