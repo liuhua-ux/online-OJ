@@ -43,3 +43,4 @@ hot100/
 
 # 简历（只留本地，不进 git）
 docs/简历/
+oj_server/logs/

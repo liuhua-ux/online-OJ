@@ -1564,6 +1564,66 @@ bool admin_guard(int conn_fd, const string &current_user)   // true = 放行
 
 **诚实边界**：压测程序与服务同机（2 核互抢，绝对吞吐偏低、横向对比有效）；回环无网络延迟；库里只有 1 道题；Flask 是开发服务器不是 gunicorn。
 
+### 37. 公开部署分支：判题进容器（2026-10-23，`feat/public-deploy`）
+
+从「回环自用」走到「别人能用」时先摸出两个事实：
+
+- **外网打不通**（`http://公网IP:8080` 超时）= 腾讯云安全组没放行，不是代码；
+- **判题子进程和服务器同一个 `ubuntu` 用户、没有网络隔离** → 任何能注册的人交一段 C++，就能在服务器上以 `ubuntu` 身份读到 `~/.ssh/id_ed25519` 和 `db_config.h`，还能联网发走。
+
+所以先给答辩版钉标签 `v1.0-course`，公开部署的改动全部放在分支 **`feat/public-deploy`**（不要求合并回 main）。
+
+#### 37a. 为什么用 Docker，而不是 setuid / chroot
+
+自建隔离要 `unshare(CLONE_NEWNET)`（要 CAP_SYS_ADMIN）、自己维护 chroot、还得防漏；容器一条命令给齐：
+
+```
+--network=none --read-only --cap-drop=ALL
+--pids-limit=128 --memory=1g --cpus=1
+-u 1000:1000 --security-opt no-new-privileges
+```
+
+**实测（容器内，5 条）**：
+
+| 尝试 | 结果 |
+| --- | --- |
+| 读 `/etc/shadow` | Permission denied |
+| 读宿主机 `~/.ssh/id_ed25519` | No such file or directory（根本没挂进去） |
+| 写 `/etc/hostname` | Read-only file system |
+| 连 `1.1.1.1:80` | Network is unreachable |
+| 写 `/work/ok.txt` | 成功 |
+
+#### 37b. 三个坑
+
+1. **glibc 不匹配**：宿主机（Ubuntu 24.04）编出来的 judge 拿到 Debian 镜像里跑，报 `GLIBC_2.38 not found` → 改成**镜像里现编**（Dockerfile 里 `COPY judge_demo/judge.cpp` + `g++`）。
+2. **`fstream` 默认是「读写」模式**：`std::fstream check(ans_path)` 在**只读挂载**上 `is_open()` 直接 false → 判题器以为没有测试点，报 `NO_DATA`。改 `ifstream` → AC。**这就是「同一个函数在读/写两种上下文的区别」的老课**。
+3. **挂载路径必须由宿主机解析**：Docker 是 **daemon** 去解析 `-v` 的路径，服务进程眼里的 `/tmp/oj_XXXXXX` 不等于 daemon 眼里的同一个目录（尤其开了 `PrivateTmp`）→ 提交目录从 `/tmp` 挪到 `/var/lib/oj/work`。
+
+#### 37c. 应用层加固（都在这个分支）
+
+- **关闭自助注册**，改成管理员在 `/admin/users` 里「新建账号」（`/admin/user/new`）；
+- **登录失败限流**：同一用户名 10 次 / 10 分钟 → 429；
+- **提交冷却**：同一用户 3 秒内第二次 → 429；
+- **体积上限**：请求体 1 MB、源码 256 KB → 413；
+- **日志**：`logs/oj.log`，一行一件事（登录失败、提交、判题结果）；
+- **systemd**：`deploy/oj-server.service`，开机自启、崩溃 3 秒重启，`SupplementaryGroups=docker` 让服务有 docker 权限。
+
+#### 37d. 实测
+
+- 端到端：提交 A+B → 容器判题 **AC 3/3**，`submissions.verdict = AC`；
+- **容器启动 ~0.45 s**；判一道 3 组测试的题 **~0.85 s**（需求 ≤ 3 s）；
+- 提交冷却：第一次 302、第二次 **429**；
+- 登录失败：第 11 次 **429**；
+- 请求体 1.1 MB → **413**；源码 300 KB → **413**；
+- 管理员建号 → 能登录；重名 400；GET 405；学生 403；
+- `systemctl restart` 后 `/problems` 200、提交正常。
+
+#### 37e. 仍未做
+
+- **HTTPS**（没有域名/备案；见 `deploy/DEPLOY.md` 的说明）；
+- `FIX-19`（CSRF）/ `FIX-20`（落盘原子性）/ `FIX-21`（丢失更新）/ `FIX-24`（禁用不踢会话）；
+- 安全组放行 8080 **必须手动在腾讯云控制台做**。
+
 ## 实测数字汇总
 
 | 项 | 数字 |

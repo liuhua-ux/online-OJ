@@ -28,6 +28,7 @@
 #include <random>
 #include <algorithm>
 #include <filesystem>
+#include <ctime>
 
 using namespace std;
 
@@ -55,6 +56,17 @@ mutex judge_mtx;
 condition_variable judge_cv;
 
 const char *JUDGE_BIN = "/home/ubuntu/online-OJ/judge_demo/judge";
+
+// —— 公开部署（feat/public-deploy 分支）——
+const string JUDGE_IMAGE = "oj-judge:latest";       // 判题镜像，见 deploy/judge/Dockerfile
+const string WORK_ROOT = "/var/lib/oj/work";        // 提交临时目录（docker 挂载要用宿主机路径）
+const string TESTDATA_ROOT = "/home/ubuntu/online-OJ/judge_demo/testdata";
+const size_t MAX_BODY_BYTES = 1024 * 1024;          // 请求体上限 1MB
+const size_t MAX_CODE_BYTES = 256 * 1024;           // 源码上限 256KB
+const bool ALLOW_REGISTRATION = false;              // 公开部署关闭自助注册
+const int LOGIN_MAX_FAILS = 10;                     // 同一用户名 10 次失败
+const int LOGIN_FAIL_WINDOW = 600;                  // 10 分钟窗口
+const int SUBMIT_COOLDOWN_SECONDS = 3;              // 同一用户提交冷却
 const string TESTDATA_DIR = "/home/ubuntu/online-OJ/judge_demo/testdata";
 const string PROBLEM_PREFIX = "/problem/";
 const string SUBMIT_PREFIX = "/submit/";
@@ -81,6 +93,28 @@ const map<string, string>
 // 渲染页面时要显示"谁在登录"。每个请求在同一个线程里跑完，所以 thread_local 够用。
 thread_local string nav_user;
 
+// —— 简单日志（FIX-07）：一行一件事，追加写 logs/oj.log ——
+mutex log_mtx;
+
+void log_line(const string &level, const string &msg)
+{
+    lock_guard<mutex> lock(log_mtx);
+    ofstream f("logs/oj.log", ios::app);
+    if (!f)
+    {
+        return;
+    }
+    time_t now = time(nullptr);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&now));
+    f << buf << " [" << level << "] " << msg << "\n";
+}
+
+// —— 限流状态（进程内；重启归零，够用）——
+mutex throttle_mtx;
+map<string, pair<int, time_t>> login_fails;    // 用户名 → (失败次数, 最后一次时间)
+map<string, time_t> last_submit;               // 用户名 → 上次提交时间
+
 void send_response(int conn_fd, int code, const string &body, const string &content_type = "text/plain; charset=utf-8", const string &extra_headers = "")
 {
     string reason;
@@ -103,6 +137,18 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
     else if (code == 500)
     {
         reason = "Internal Server Error";
+    }
+    else if (code == 405)
+    {
+        reason = "Method Not Allowed";
+    }
+    else if (code == 413)
+    {
+        reason = "Payload Too Large";
+    }
+    else if (code == 429)
+    {
+        reason = "Too Many Requests";
     }
     else
     {
@@ -306,6 +352,11 @@ string nav_right()
 {
     if (nav_user.empty())
     {
+        // 关了自助注册就别放一个点进去 403 的链接
+        if (!ALLOW_REGISTRATION)
+        {
+            return "    <a href=\"/login\">登录</a>\n";
+        }
         return "    <a href=\"/login\">登录</a>\n"
                "    <a href=\"/register\">注册</a>\n";
     }
@@ -454,19 +505,38 @@ bool run_judge(const string &src_path, const string &data_dir, int tl_ms, int ml
         dup2(fd[1], 1);
         close(fd[1]);
 
-        if (chdir(work_dir.c_str()) == -1)
+        // 判题放进容器：没网、根文件系统只读、只有 /work 可写、testdata 只读挂载
+        vector<string> args = {
+            "docker", "run", "--rm",
+            "--network=none",
+            "--read-only",
+            "--tmpfs", "/tmp:rw,size=128m",
+            "-u", "1000:1000",
+            "--memory", "1g",
+            "--memory-swap", "1g",
+            "--cpus", "1",
+            "--pids-limit", "128",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "-v", work_dir + ":/work",
+            "-v", data_dir + ":/data:ro",
+            "-w", "/work",
+            JUDGE_IMAGE,
+            "/opt/judge/judge",
+            "/work/submission.cpp",
+            "/data",
+            to_string(tl_ms),
+            to_string(ml_mb),
+        };
+
+        vector<char *> argv;
+        for (auto &a : args)
         {
-            _exit(CHILD_NOT_STARTED);
+            argv.push_back(&a[0]);
         }
+        argv.push_back(nullptr);
 
-        execl(JUDGE_BIN,
-              "judge",
-              src_path.c_str(),
-              data_dir.c_str(),
-              to_string(tl_ms).c_str(),
-              to_string(ml_mb).c_str(),
-              (char *)NULL);
-
+        execvp("docker", argv.data());
         _exit(CHILD_NOT_STARTED);
     }
 
@@ -487,7 +557,18 @@ bool run_judge(const string &src_path, const string &data_dir, int tl_ms, int ml
         return false;
     }
 
-    return WIFEXITED(status) && WEXITSTATUS(status) != CHILD_NOT_STARTED;
+    if (!WIFEXITED(status))
+    {
+        return false;
+    }
+
+    int code = WEXITSTATUS(status);
+    if (code == 125 || code == 126 || code == CHILD_NOT_STARTED)
+    {
+        cerr << "docker / judge 没有正常启动，退出码 " << code << endl;
+        return false;   // → started=false → 记为 SE
+    }
+    return true;
 }
 
 struct JudgeSummary
@@ -2006,6 +2087,14 @@ string render_admin_users(const string &me)
             "<p class=\"lead\">重置口令、禁用账号、授予或收回管理员。</p></header>\n";
     page << "<p><a href=\"/admin/problems\">← 题目管理</a></p>\n";
 
+    // 自助注册关掉了，账号就得从这儿建
+    page << "<h3>新建账号</h3>\n"
+            "<form class=\"form\" method=\"POST\" action=\"/admin/user/new\">\n"
+            "<p>用户名 <input name=\"username\" size=\"20\" maxlength=\"32\">　"
+            "初始密码 <input name=\"password\" type=\"password\" size=\"20\">　"
+            "<button type=\"submit\">创建</button></p>\n"
+            "</form>\n";
+
     page << "<table class=\"sub-table\">\n";
     page << "<tr><th>用户名</th><th>角色</th><th>状态</th><th>注册时间</th>"
             "<th>重置口令</th><th>操作</th></tr>\n";
@@ -2072,8 +2161,7 @@ void judge_worker()
 
         set_status(t.job_id, "判题中");
 
-        string data_dir = "/home/ubuntu/online-OJ/judge_demo/testdata/" +
-                          to_string(t.problem_id);
+        string data_dir = TESTDATA_ROOT + "/" + to_string(t.problem_id);
         string src_path = t.work_dir + "/submission.cpp";
 
         string out;
@@ -2083,6 +2171,8 @@ void judge_worker()
         int total = count_testcases(t.problem_id);
 
         finish_job(t.job_id, out, s, total, started);
+        log_line("INFO", "判题 job=" + t.job_id + " verdict=" + s.verdict +
+                         " passed=" + to_string(s.passed) + "/" + to_string(total));
 
         std::error_code ec;
         std::filesystem::remove_all(t.work_dir, ec);
@@ -2196,6 +2286,12 @@ void handle_request(int conn_fd, const string &req)
         cout << "no body" << "\n";
     }
 
+    if (body_need > MAX_BODY_BYTES)
+    {
+        send_response(conn_fd, 413, "请求体太大\n");
+        return;
+    }
+
     string body = req.substr(head_end + 4, body_need);
     map<string, string> form = parse_form(body);
     map<string, string> query_params = parse_form(query);
@@ -2275,6 +2371,18 @@ void handle_request(int conn_fd, const string &req)
             return;
         }
 
+        {
+            lock_guard<mutex> lock(throttle_mtx);
+            time_t now = time(nullptr);
+            auto it = last_submit.find(current_user);
+            if (it != last_submit.end() && now - it->second < SUBMIT_COOLDOWN_SECONDS)
+            {
+                send_response(conn_fd, 429, "提交太频繁，请等几秒再试\n");
+                return;
+            }
+            last_submit[current_user] = now;
+        }
+
         string num = path.substr(SUBMIT_PREFIX.size());
         int problem_id = 0;
         bool ok_id = !num.empty() && num.find_first_not_of("0123456789") == string::npos;
@@ -2304,14 +2412,22 @@ void handle_request(int conn_fd, const string &req)
             code = form["code"];
         }
 
+        if (code.size() > MAX_CODE_BYTES)
+        {
+            send_response(conn_fd, 413, "源码超过 256 KB，请精简后重试\n");
+            return;
+        }
+
         if (code.find_first_not_of(" \t\r\n") == string::npos)
         {
             send_response(conn_fd, 400, "代码不能为空\n");
             return;
         }
 
-        char tmpl[] = "/tmp/oj_XXXXXX";
-        char *dir = mkdtemp(tmpl);
+        std::error_code mk_ec;
+        std::filesystem::create_directories(WORK_ROOT, mk_ec);
+        string tmpl_s = WORK_ROOT + "/oj_XXXXXX";
+        char *dir = mkdtemp(&tmpl_s[0]);
         if (dir == nullptr)
         {
             send_response(conn_fd, 500, "服务器开不了临时目录\n");
@@ -2360,6 +2476,8 @@ void handle_request(int conn_fd, const string &req)
         judge_cv.notify_one();
 
         cout << "入队 job_id=" << job_id << " problem=" << problem_id << endl;
+        log_line("INFO", "提交 user=" + current_user + " job=" + job_id +
+                         " problem=" + to_string(problem_id));
         send_redirect(conn_fd, "/result/" + job_id);
     }
     // 提交结果
@@ -2397,6 +2515,12 @@ void handle_request(int conn_fd, const string &req)
     // 注册
     else if (path == "/register")
     {
+        if (!ALLOW_REGISTRATION)
+        {
+            send_response(conn_fd, 403, "注册已关闭，请联系管理员开通账号\n");
+            return;
+        }
+
         if (method == "POST")
         {
             string username, password, password2;
@@ -2494,6 +2618,18 @@ void handle_request(int conn_fd, const string &req)
                 return;
             }
 
+            {
+                lock_guard<mutex> lock(throttle_mtx);
+                auto it = login_fails.find(username);
+                if (it != login_fails.end() &&
+                    it->second.first >= LOGIN_MAX_FAILS &&
+                    time(nullptr) - it->second.second < LOGIN_FAIL_WINDOW)
+                {
+                    send_response(conn_fd, 429, "尝试次数过多，请 10 分钟后再试\n");
+                    return;
+                }
+            }
+
             MYSQL *conn = get_conn();
             if (conn == nullptr)
             {
@@ -2534,8 +2670,25 @@ void handle_request(int conn_fd, const string &req)
             // 用户不存在 和 密码不对，故意返回同一句话
             if (!ok)
             {
+                {
+                    lock_guard<mutex> lock(throttle_mtx);
+                    time_t now = time(nullptr);
+                    auto &st = login_fails[username];
+                    if (now - st.second > LOGIN_FAIL_WINDOW)
+                    {
+                        st.first = 0;
+                    }
+                    st.first++;
+                    st.second = now;
+                }
+                log_line("WARN", "登录失败 user=" + username);
                 send_response(conn_fd, 200, "用户名或密码不对\n");
                 return;
+            }
+
+            {
+                lock_guard<mutex> lock(throttle_mtx);
+                login_fails.erase(username);
             }
 
             // 禁用检查放密码之后：密码答对了才说这句
@@ -2825,6 +2978,65 @@ void handle_request(int conn_fd, const string &req)
         }
         else
         {
+            // 管理员建号（注册已关闭时的唯一入口）
+            if (path == "/admin/user/new")
+            {
+                if (method != "POST")
+                {
+                    send_response(conn_fd, 405, "这个操作必须用 POST\n");
+                    return;
+                }
+
+                string uname = trim(field_value(form, "username"));
+                string pw = field_value(form, "password");
+
+                if (uname.empty() || pw.empty())
+                {
+                    send_response(conn_fd, 400, "用户名和初始密码都要填\n");
+                    return;
+                }
+                if (uname.size() > 32)
+                {
+                    send_response(conn_fd, 400, "用户名最多 32 个字符\n");
+                    return;
+                }
+
+                string hash = make_password_hash(pw);
+                if (hash.empty())
+                {
+                    send_response(conn_fd, 500, "创建失败，请重试\n");
+                    return;
+                }
+
+                MYSQL *conn = get_conn();
+                if (conn == nullptr)
+                {
+                    send_response(conn_fd, 500, "数据库暂时不可用\n");
+                    return;
+                }
+
+                string sql = "INSERT INTO users (username, password_hash, created_at) "
+                             "VALUES ('" + escape_sql(uname) + "', '" +
+                             escape_sql(hash) + "', NOW())";
+                if (mysql_query(conn, sql.c_str()) != 0)
+                {
+                    if (mysql_errno(conn) == 1062)
+                    {
+                        send_response(conn_fd, 400, "这个用户名已经有了\n");
+                    }
+                    else
+                    {
+                        cerr << "create user failed: " << mysql_error(conn) << endl;
+                        send_response(conn_fd, 500, "创建失败，请重试\n");
+                    }
+                    return;
+                }
+
+                log_line("INFO", "管理员建号 user=" + uname + " by=" + current_user);
+                send_redirect(conn_fd, "/admin/users");
+                return;
+            }
+
             int uid = 0;
             string uact;
             if (parse_admin_user_path(path, uid, uact))
@@ -3196,6 +3408,10 @@ int main()
         perror("listen");
         return 1;
     }
+
+    std::filesystem::create_directories("logs");
+    log_line("INFO", "服务启动：port=8080，判题镜像 " + JUDGE_IMAGE +
+                     "，注册" + (ALLOW_REGISTRATION ? "开启" : "关闭"));
 
     cout << "listening on 8080.....\n"
          << flush;

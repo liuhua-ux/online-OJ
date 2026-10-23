@@ -174,7 +174,7 @@ int main(int argc, char *argv[])
     {
         string in_path = string(argv[2]) + "/" + to_string(i) + ".in";
         string ans_path = string(argv[2]) + "/" + to_string(i) + ".ans";
-        fstream check(ans_path);
+        ifstream check(ans_path);   // 只读打开：容器里 testdata 是只读挂载，fstream 默认带写权限会打不开
         if (!check.is_open())
         {
             break;

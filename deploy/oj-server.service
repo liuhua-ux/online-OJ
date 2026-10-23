@@ -1,0 +1,19 @@
+[Unit]
+Description=Online OJ - C++ epoll server
+After=network-online.target docker.service mysql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+SupplementaryGroups=docker
+WorkingDirectory=/home/ubuntu/online-OJ/oj_server
+ExecStart=/home/ubuntu/online-OJ/oj_server/server
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
