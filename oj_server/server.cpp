@@ -55,6 +55,7 @@ mutex judge_mtx;
 condition_variable judge_cv;
 
 const char *JUDGE_BIN = "/home/ubuntu/online-OJ/judge_demo/judge";
+const string TESTDATA_DIR = "/home/ubuntu/online-OJ/judge_demo/testdata";
 const string PROBLEM_PREFIX = "/problem/";
 const string SUBMIT_PREFIX = "/submit/";
 const string RESULT_PREFIX = "/result/";
@@ -206,6 +207,68 @@ map<string, string> parse_form(const string &body)
         form[urldecode(key)] = urldecode(val);
     }
     return form;
+}
+
+// 和 parse_form 一样，但**同名参数全都留着** —— 测试点是 N 个 tc_in / N 个 tc_ans，
+// 普通 map 只会留下最后一个
+map<string, vector<string>> parse_form_multi(const string &body)
+{
+    map<string, vector<string>> out;
+    size_t start = 0;
+    while (start <= body.size())
+    {
+        size_t amp = body.find('&', start);
+        string pair_s = body.substr(start, (amp == string::npos) ? string::npos : amp - start);
+        if (!pair_s.empty())
+        {
+            size_t eq = pair_s.find('=');
+            string k = urldecode(pair_s.substr(0, eq));
+            string v = (eq == string::npos) ? "" : urldecode(pair_s.substr(eq + 1));
+            out[k].push_back(v);
+        }
+        if (amp == string::npos)
+        {
+            break;
+        }
+        start = amp + 1;
+    }
+    return out;
+}
+
+// 浏览器交上来的多行文本换行是 \r\n，落盘前统一成 \n。
+// 不归一化的话，判题器逐行比对时多一个看不见的 \r，判谁都是 WA
+string normalize_newlines(const string &text)
+{
+    string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size(); i++)
+    {
+        if (text[i] == '\r')
+        {
+            if (i + 1 < text.size() && text[i + 1] == '\n')
+            {
+                continue; // \r\n 的 \r 丢掉，\n 下一轮自然留下
+            }
+            out += '\n'; // 单独的 \r 也当换行
+        }
+        else
+        {
+            out += text[i];
+        }
+    }
+    return out;
+}
+
+string read_text_file(const string &path)
+{
+    ifstream f(path, ios::binary);
+    if (!f)
+    {
+        return "";
+    }
+    stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
 }
 
 string html_escape(const string &page)
@@ -1307,6 +1370,369 @@ int count_testcases(int problem_id)
     return n;
 }
 
+// field_value 定义在后面（渲染表单那边），这里先用前向声明
+string field_value(const map<string, string> &v, const string &k);
+
+struct ProblemRow
+{
+    string title, description, input_format, output_format, sample_input, sample_output;
+    int time_limit_ms = 0;
+    int memory_limit_mb = 0;
+    bool is_published = false;
+    bool is_deleted = false;
+};
+
+// 管理页专用：软删除的也查得到（学生侧那个查询会把已删除当不存在）
+bool get_problem_for_admin(int problem_id, ProblemRow &p)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string sql = "SELECT title, description, input_format, output_format, "
+                 "sample_input, sample_output, time_limit_ms, memory_limit_mb, "
+                 "is_published, is_deleted FROM problems WHERE problem_id = " +
+                 to_string(problem_id);
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "get_problem_for_admin failed: " << mysql_error(conn) << endl;
+        return false;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+    {
+        return false;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    bool found = (row != nullptr);
+    if (found)
+    {
+        p.title = row[0] ? row[0] : "";
+        p.description = row[1] ? row[1] : "";
+        p.input_format = row[2] ? row[2] : "";
+        p.output_format = row[3] ? row[3] : "";
+        p.sample_input = row[4] ? row[4] : "";
+        p.sample_output = row[5] ? row[5] : "";
+        p.time_limit_ms = row[6] ? stoi(row[6]) : 0;
+        p.memory_limit_mb = row[7] ? stoi(row[7]) : 0;
+        p.is_published = (row[8] != nullptr && string(row[8]) == "1");
+        p.is_deleted = (row[9] != nullptr && string(row[9]) == "1");
+    }
+
+    mysql_free_result(res);
+    return found;
+}
+
+// 按库里的元信息把测试点从磁盘读回来，填进表单
+vector<pair<string, string>> load_testcases(int problem_id)
+{
+    vector<pair<string, string>> cases;
+
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return cases;
+    }
+
+    string sql = "SELECT input_path, answer_path FROM testcases "
+                 "WHERE problem_id = " +
+                 to_string(problem_id) + " ORDER BY ordinal";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "load_testcases failed: " << mysql_error(conn) << endl;
+        return cases;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+    {
+        return cases;
+    }
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res)) != NULL)
+    {
+        string in_text = row[0] ? read_text_file(TESTDATA_DIR + "/" + row[0]) : "";
+        string ans_text = row[1] ? read_text_file(TESTDATA_DIR + "/" + row[1]) : "";
+        cases.push_back({in_text, ans_text});
+    }
+
+    mysql_free_result(res);
+    return cases;
+}
+
+struct TestcaseMeta
+{
+    string in_path, ans_path;
+    int in_size = 0;
+    int ans_size = 0;
+};
+
+// 按顺序从 1 重新编号写盘。**先清空整个目录**：
+// 只覆盖前 N 个的话，旧的 3.in 还躺着，判题器会把它当「还有下一组」接着判
+bool save_testcases_to_disk(int problem_id,
+                            const vector<pair<string, string>> &cases,
+                            vector<TestcaseMeta> &meta)
+{
+    string dir = TESTDATA_DIR + "/" + to_string(problem_id);
+    std::error_code ec;
+
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+    {
+        cerr << "mkdir testdata failed: " << ec.message() << endl;
+        return false;
+    }
+
+    meta.clear();
+    for (size_t i = 0; i < cases.size(); i++)
+    {
+        int ordinal = static_cast<int>(i) + 1;
+        string in_text = normalize_newlines(cases[i].first);
+        string ans_text = normalize_newlines(cases[i].second);
+
+        string in_file = "/" + to_string(ordinal) + ".in";
+        string ans_file = "/" + to_string(ordinal) + ".ans";
+
+        ofstream fin(dir + in_file, ios::binary);
+        fin << in_text;
+        if (fin.fail())
+        {
+            return false;
+        }
+
+        ofstream fans(dir + ans_file, ios::binary);
+        fans << ans_text;
+        if (fans.fail())
+        {
+            return false;
+        }
+
+        // 库里存相对路径：换机器、换目录，库里的数据不用改
+        TestcaseMeta m;
+        m.in_path = to_string(problem_id) + in_file;
+        m.ans_path = to_string(problem_id) + ans_file;
+        m.in_size = static_cast<int>(in_text.size());
+        m.ans_size = static_cast<int>(ans_text.size());
+        meta.push_back(m);
+    }
+    return true;
+}
+
+// 元信息整份换掉。DELETE + INSERT 裹在同一个事务里：
+// 不裹的话 DELETE 完 INSERT 挂了 = 这道题的测试点元信息整个消失
+bool replace_testcases(int problem_id, const vector<TestcaseMeta> &meta)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    if (mysql_query(conn, "START TRANSACTION") != 0)
+    {
+        return false;
+    }
+
+    string del = "DELETE FROM testcases WHERE problem_id = " + to_string(problem_id);
+    if (mysql_query(conn, del.c_str()) != 0)
+    {
+        cerr << "delete testcases failed: " << mysql_error(conn) << endl;
+        mysql_query(conn, "ROLLBACK");
+        return false;
+    }
+
+    for (size_t i = 0; i < meta.size(); i++)
+    {
+        string sql = "INSERT INTO testcases "
+                     "(problem_id, ordinal, input_path, answer_path, input_size, answer_size) "
+                     "VALUES (" +
+                     to_string(problem_id) + ", " + to_string(i + 1) + ", '" +
+                     escape_sql(meta[i].in_path) + "', '" +
+                     escape_sql(meta[i].ans_path) + "', " +
+                     to_string(meta[i].in_size) + ", " +
+                     to_string(meta[i].ans_size) + ")";
+
+        if (mysql_query(conn, sql.c_str()) != 0)
+        {
+            cerr << "insert testcase failed: " << mysql_error(conn) << endl;
+            mysql_query(conn, "ROLLBACK");
+            return false;
+        }
+    }
+
+    return mysql_query(conn, "COMMIT") == 0;
+}
+
+bool update_problem(int problem_id, const map<string, string> &v, int tl_ms, int ml_mb, bool publish)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    // AND is_deleted = 0：软删除的题不许再改
+    string sql = "UPDATE problems SET title = '" + escape_sql(field_value(v, "title")) +
+                 "', description = '" + escape_sql(field_value(v, "description")) +
+                 "', input_format = '" + escape_sql(field_value(v, "input_format")) +
+                 "', output_format = '" + escape_sql(field_value(v, "output_format")) +
+                 "', sample_input = '" + escape_sql(field_value(v, "sample_input")) +
+                 "', sample_output = '" + escape_sql(field_value(v, "sample_output")) +
+                 "', time_limit_ms = " + to_string(tl_ms) +
+                 ", memory_limit_mb = " + to_string(ml_mb) +
+                 ", is_published = " + to_string(publish ? 1 : 0) +
+                 " WHERE problem_id = " + to_string(problem_id) + " AND is_deleted = 0";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "update_problem failed: " << mysql_error(conn) << endl;
+        return false;
+    }
+    return true;
+}
+
+// 从 "/admin/problem/12/edit" 抠出 12 和 "edit"；不是这个形状返回 false
+bool parse_admin_problem_path(const string &path, int &problem_id, string &action)
+{
+    const string prefix = "/admin/problem/";
+    if (path.compare(0, prefix.size(), prefix) != 0)
+    {
+        return false;
+    }
+
+    string rest = path.substr(prefix.size());
+    size_t slash = rest.find('/');
+    if (slash == string::npos)
+    {
+        return false;
+    }
+
+    string num = rest.substr(0, slash);
+    action = rest.substr(slash + 1);
+
+    if (num.empty() || num.find_first_not_of("0123456789") != string::npos)
+    {
+        return false;
+    }
+
+    try
+    {
+        problem_id = stoi(num);
+    }
+    catch (const exception &)
+    {
+        return false;
+    }
+    return true;
+}
+
+// 读表单里的值。**用 find，不用 operator[]** —— 读的时候 [] 会凭空造一个空键（决策 5）
+string field_value(const map<string, string> &v, const string &k)
+{
+    auto it = v.find(k);
+    return (it == v.end()) ? "" : it->second;
+}
+
+// 「整串都是数字」+ 正数。abc / 1.5 / 空串 / 0 / -5 全都过不了
+bool parse_positive_int(const string &s, int &out)
+{
+    long v = 0;
+    if (!to_long(s, v))
+    {
+        return false;
+    }
+    if (v <= 0 || v > 2147483647L)
+    {
+        return false;
+    }
+    out = static_cast<int>(v);
+    return true;
+}
+
+string render_problem_form(const string &heading, const string &action,
+                           const map<string, string> &v, const string &error,
+                           const vector<pair<string, string>> *cases = nullptr,
+                           int extra_rows = 0)
+{
+    stringstream page;
+    page << page_head(heading);
+    page << "<p class=\"breadcrumb\"><a href=\"/admin/problems\">题目管理</a> / "
+         << heading << "</p>\n";
+    page << "<header class=\"page-head\"><h1>" << heading << "</h1>"
+                                                             "<p class=\"lead\">新建的题默认是草稿，先配好测试点再发布。</p></header>\n";
+
+    if (!error.empty())
+    {
+        page << "<p class=\"empty\">保存失败：" << html_escape(error) << "</p>\n";
+    }
+
+    page << "<form class=\"form\" method=\"POST\" action=\"" << action << "\">\n";
+
+    page << "<p>标题<br><input name=\"title\" size=\"60\" value=\""
+         << html_escape(field_value(v, "title")) << "\"></p>\n";
+
+    page << "<p>题目描述<br><textarea name=\"description\" rows=\"8\" cols=\"80\">"
+         << html_escape(field_value(v, "description")) << "</textarea></p>\n";
+
+    page << "<p>输入格式<br><textarea name=\"input_format\" rows=\"3\" cols=\"80\">"
+         << html_escape(field_value(v, "input_format")) << "</textarea></p>\n";
+
+    page << "<p>输出格式<br><textarea name=\"output_format\" rows=\"3\" cols=\"80\">"
+         << html_escape(field_value(v, "output_format")) << "</textarea></p>\n";
+
+    page << "<p>样例输入<br><textarea name=\"sample_input\" rows=\"4\" cols=\"80\">"
+         << html_escape(field_value(v, "sample_input")) << "</textarea></p>\n";
+
+    page << "<p>样例输出<br><textarea name=\"sample_output\" rows=\"4\" cols=\"80\">"
+         << html_escape(field_value(v, "sample_output")) << "</textarea></p>\n";
+
+    page << "<p>时间限制（毫秒）<input name=\"time_limit_ms\" size=\"8\" value=\""
+         << html_escape(field_value(v, "time_limit_ms")) << "\">　"
+                                                            "内存限制（MB）<input name=\"memory_limit_mb\" size=\"8\" value=\""
+         << html_escape(field_value(v, "memory_limit_mb")) << "\"></p>\n";
+
+    if (cases != nullptr)
+    {
+        string checked = (field_value(v, "is_published") == "1") ? " checked" : "";
+        page << "<p><label><input type=\"checkbox\" name=\"is_published\" value=\"1\""
+             << checked << "> 发布（不勾 = 草稿，学生看不到）</label></p>\n";
+
+        page << "<h3>测试点</h3>\n";
+        page << "<p class=\"note\">判题按 1、2、3…… 顺序跑，遇到第一个不通过就停。"
+                "<b>序号不用你操心</b>：保存时服务端按顺序统一重新编号。"
+                "要删中间的某一组，把它的两个框清空即可，后面的会自动补上来。</p>\n";
+
+        int total = static_cast<int>(cases->size()) + extra_rows + 1; // 末尾常留一个空位
+        for (int i = 0; i < total; i++)
+        {
+            string in_text = (i < static_cast<int>(cases->size())) ? (*cases)[i].first : "";
+            string ans_text = (i < static_cast<int>(cases->size())) ? (*cases)[i].second : "";
+
+            page << "<h4>第 " << (i + 1) << " 组</h4>\n";
+            page << "<p>输入<br><textarea name=\"tc_in\" rows=\"4\" cols=\"80\">"
+                 << html_escape(in_text) << "</textarea></p>\n";
+            page << "<p>答案<br><textarea name=\"tc_ans\" rows=\"4\" cols=\"80\">"
+                 << html_escape(ans_text) << "</textarea></p>\n";
+        }
+
+        page << "<p><a href=\"" << action << "?rows=" << (extra_rows + 1)
+             << "\">＋ 再加一个空位</a></p>\n";
+    }
+
+    page << "<p><button type=\"submit\">保存</button></p>\n";
+    page << "</form>\n";
+    page << page_tail();
+    return page.str();
+}
+
 string render_admin_problems()
 {
     MYSQL *conn = get_conn();
@@ -2063,186 +2489,469 @@ void handle_request(int conn_fd, const string &req)
             send_response(conn_fd, 200, render_admin_problems(),
                           "text/html; charset=utf-8");
         }
+        else if (path == "/admin/problem/new")
+        {
+            if (method == "POST")
+            {
+                string title = trim(field_value(form, "title"));
+                string description = field_value(form, "description");
+                int tl = 0;
+                int ml = 0;
+
+                string error;
+                if (title.empty())
+                {
+                    error = "标题不能为空";
+                }
+                else if (description.empty())
+                {
+                    error = "题面不能为空";
+                }
+                else if (trim(field_value(form, "input_format")).empty())
+                {
+                    error = "输入格式不能为空";
+                }
+                else if (trim(field_value(form, "output_format")).empty())
+                {
+                    error = "输出格式不能为空";
+                }
+                else if (!parse_positive_int(field_value(form, "time_limit_ms"), tl))
+                {
+                    error = "时间限制要填正整数（毫秒）";
+                }
+                else if (!parse_positive_int(field_value(form, "memory_limit_mb"), ml))
+                {
+                    error = "内存限制要填正整数（MB）";
+                }
+
+                if (!error.empty())
+                {
+                    // 400 也要把刚填的内容原样放回去 —— 这是表单页的基本礼貌
+                    send_response(conn_fd, 400,
+                                  render_problem_form("新建题目", "/admin/problem/new", form, error),
+                                  "text/html; charset=utf-8");
+                    return;
+                }
+
+                MYSQL *conn = get_conn();
+                if (conn == nullptr)
+                {
+                    send_response(conn_fd, 500, "数据库暂时不可用\n");
+                    return;
+                }
+
+                string sql = "INSERT INTO problems "
+                             "(title, description, input_format, output_format, "
+                             " sample_input, sample_output, time_limit_ms, memory_limit_mb, "
+                             " is_published, is_deleted, created_at) "
+                             "VALUES ('" +
+                             escape_sql(title) + "', '" +
+                             escape_sql(description) + "', '" +
+                             escape_sql(field_value(form, "input_format")) + "', '" +
+                             escape_sql(field_value(form, "output_format")) + "', '" +
+                             escape_sql(field_value(form, "sample_input")) + "', '" +
+                             escape_sql(field_value(form, "sample_output")) + "', " +
+                             to_string(tl) + ", " + to_string(ml) +
+                             ", 0, 0, NOW())"; // ← 发布状态写死 0
+
+                if (mysql_query(conn, sql.c_str()) != 0)
+                {
+                    cerr << "create problem failed: " << mysql_error(conn) << endl;
+                    send_response(conn_fd, 500, "保存失败，请重试\n");
+                    return;
+                }
+
+                int new_id = static_cast<int>(mysql_insert_id(conn));
+                cout << "新建题目 id=" << new_id << endl;
+
+                send_redirect(conn_fd, "/admin/problem/" + to_string(new_id) + "/edit");
+                return;
+            }
+
+            send_response(conn_fd, 200,
+                          render_problem_form("新建题目", "/admin/problem/new", {}, ""),
+                          "text/html; charset=utf-8");
+        }
         else
         {
-            send_response(conn_fd, 404, "没有这个管理页面\n");
-        }
-    }
-    // 当前登录状态（调试用）
-    else if (path == "/whoami")
-    {
-        send_response(conn_fd, 200,
-                      current_user.empty() ? "未登录\n" : current_user + "\n");
-    }
-    // 其余按静态文件处理
-    else
-    {
-        path = urldecode(path, false);
-        string road = "www" + path;
-
-        char root_buf[PATH_MAX];
-        char full_buf[PATH_MAX];
-        char *root_p = realpath("www", root_buf);
-        char *full_p = realpath(road.c_str(), full_buf);
-
-        string root, real;
-        if (root_p != NULL)
-        {
-            root = root_buf;
-        }
-        if (full_p != NULL)
-        {
-            real = full_buf;
-        }
-
-        bool ok = !root.empty() && real.compare(0, root.size() + 1, root + "/") == 0;
-        if (!ok)
-        {
-            send_response(conn_fd, 404, "请输入正确的网址\n");
-        }
-
-        else
-        {
-            ifstream f(road);
-            string ext;
-            size_t pos = road.rfind('.');
-
-            if (pos != string::npos)
+            int pid = 0;
+            string act;
+            if (!parse_admin_problem_path(path, pid, act))
             {
-                ext = road.substr(pos + 1, road.size() - pos);
+                send_response(conn_fd, 404, "没有这个管理页面\n");
+                return;
             }
-            auto it = content_types.find(ext);
-            string type = (it != content_types.end()) ? it->second : content_types.at("");
 
-            if (f.is_open())
+            // 删除：只认 POST（GET 会被预取/爬虫触发）
+            if (act == "delete")
             {
-                stringstream ss;
-                ss << f.rdbuf();
-                string resource = ss.str();
-                send_response(conn_fd, 200, resource, type);
-            }
-            else
-            {
-                send_response(conn_fd, 404, "请输入正确的网址\n");
-            }
-        }
-    }
-}
-
-int main()
-{
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd == -1)
-    {
-        perror("socket");
-        return 1;
-    }
-
-    int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(8080);
-
-    if (bind(listen_fd, (sockaddr *)&addr, sizeof(addr)) == -1)
-    {
-        perror("bind");
-        return 1;
-    }
-
-    if (listen(listen_fd, 10) == -1)
-    {
-        perror("listen");
-        return 1;
-    }
-
-    cout << "listening on 8080.....\n"
-         << flush;
-
-    fcntl(listen_fd, F_SETFL, fcntl(listen_fd, F_GETFL) | O_NONBLOCK);
-
-    int epfd = epoll_create1(0);
-
-    epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.fd = listen_fd;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
-
-    epoll_event events[64];
-    map<int, string> conn_bufs;
-
-    thread t1(worker), t2(worker), t3(worker), t4(worker);
-    thread j1(judge_worker), j2(judge_worker);
-
-    while (true)
-    {
-        int n = epoll_wait(epfd, events, 64, -1);
-
-        for (int i = 0; i < n; i++)
-        {
-            int fd = events[i].data.fd;
-
-            if (fd == listen_fd)
-            {
-                while (true)
+                if (method != "POST")
                 {
-                    int conn_fd = accept(listen_fd, NULL, NULL);
-                    if (conn_fd == -1)
-                    {
-                        break;
-                    }
-
-                    fcntl(conn_fd, F_SETFL, fcntl(conn_fd, F_GETFL) | O_NONBLOCK);
-                    ev.events = EPOLLIN;
-                    ev.data.fd = conn_fd;
-                    epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &ev);
-
-                    cout << "接到新连接 fd = " << conn_fd << "\n"
-                         << flush;
+                    send_response(conn_fd, 405, "删除必须用 POST\n");
+                    return;
                 }
-            }
-            else
-            {
-                char buf[4096];
-                ssize_t cnt = read(fd, buf, sizeof(buf));
 
-                if (cnt > 0)
+                MYSQL *conn = get_conn();
+                if (conn == nullptr)
                 {
-                    conn_bufs[fd].append(buf, cnt);
-                    cout << "fd " << fd << " 收到 " << cnt << " 字节，累积 " << conn_bufs[fd].size() << " 字节" << endl;
+                    send_response(conn_fd, 500, "数据库暂时不可用\n");
+                    return;
+                }
 
-                    size_t need = request_total_len(conn_bufs[fd]);
-                    if (need != string::npos && conn_bufs[fd].size() >= need)
+                // 软删除：行留着，历史提交才不会变孤儿；顺手清掉发布状态
+                string sql = "UPDATE problems SET is_deleted = 1, is_published = 0 "
+                             "WHERE problem_id = " +
+                             to_string(pid);
+                if (mysql_query(conn, sql.c_str()) != 0)
+                {
+                    cerr << "soft delete failed: " << mysql_error(conn) << endl;
+                    send_response(conn_fd, 500, "删除失败，请重试\n");
+                    return;
+                }
+
+                send_redirect(conn_fd, "/admin/problems");
+                return;
+            }
+
+            if (act != "edit")
+            {
+                send_response(conn_fd, 404, "没有这个管理页面\n");
+                return;
+            }
+
+            ProblemRow p;
+            if (!get_problem_for_admin(pid, p))
+            {
+                send_response(conn_fd, 404, "没有这道题\n");
+                return;
+            }
+            if (p.is_deleted)
+            {
+                send_response(conn_fd, 403, "这道题已删除（软删除），不能再编辑了\n");
+                return;
+            }
+
+            string action = "/admin/problem/" + to_string(pid) + "/edit";
+
+            if (method == "POST")
+            {
+                map<string, vector<string>> multi = parse_form_multi(body);
+
+                map<string, string> values;
+                for (const auto &kv : multi)
+                {
+                    if (!kv.second.empty())
                     {
-                        string req = conn_bufs[fd];
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-                        conn_bufs.erase(fd);
-                        {
-                            lock_guard<mutex> lock(mtx);
-                            task_queue.push({fd, req});
-                        }
-                        cv.notify_one();
+                        values[kv.first] = kv.second.front();
                     }
                 }
-                else if (cnt == 0)
+                values["title"] = trim(field_value(values, "title"));
+
+                bool publish = (field_value(values, "is_published") == "1");
+                int tl = 0;
+                int ml = 0;
+                string error;
+
+                if (values["title"].empty())
                 {
-                    cout << "fd " << fd << " 对方关闭，清理" << endl;
-                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-                    conn_bufs.erase(fd);
-                    close(fd);
+                    error = "标题不能为空";
+                }
+                else if (trim(field_value(values, "description")).empty())
+                {
+                    error = "题面不能为空";
+                }
+                else if (trim(field_value(values, "input_format")).empty())
+                {
+                    error = "输入格式不能为空";
+                }
+                else if (trim(field_value(values, "output_format")).empty())
+                {
+                    error = "输出格式不能为空";
+                }
+                else if (!parse_positive_int(field_value(values, "time_limit_ms"), tl))
+                {
+                    error = "时间限制要填正整数（毫秒）";
+                }
+                else if (!parse_positive_int(field_value(values, "memory_limit_mb"), ml))
+                {
+                    error = "内存限制要填正整数（MB）";
+                }
+
+                // 测试点：两个列表天然一一对应，顺序就是表单里的顺序
+                vector<string> ins, answers;
+                auto it_in = multi.find("tc_in");
+                if (it_in != multi.end())
+                {
+                    ins = it_in->second;
+                }
+                auto it_ans = multi.find("tc_ans");
+                if (it_ans != multi.end())
+                {
+                    answers = it_ans->second;
+                }
+
+                vector<pair<string, string>> cases;
+                if (ins.size() != answers.size())
+                {
+                    error = "表单读到的输入框与答案框对不上，请刷新页面重来";
                 }
                 else
                 {
-                    if (errno != EAGAIN && errno != EWOULDBLOCK)
+                    for (size_t i = 0; i < ins.size(); i++)
                     {
-                        perror("read");
+                        string in_text = normalize_newlines(ins[i]);
+                        string ans_text = normalize_newlines(answers[i]);
+                        // 两个都空的块 = 没用上的空位，丢掉
+                        if (trim(in_text).empty() && trim(ans_text).empty())
+                        {
+                            continue;
+                        }
+                        cases.push_back({in_text, ans_text});
                     }
+                }
+
+                if (error.empty() && publish && cases.empty())
+                {
+                    error = "这道题一个测试点都没有，不能发布 —— 请先填好测试点，再勾「发布」";
+                }
+
+                if (!error.empty())
+                {
+                    send_response(conn_fd, 400,
+                                  render_problem_form("编辑题目", action, values, error, &cases, 0),
+                                  "text/html; charset=utf-8");
+                    return;
+                }
+
+                // 顺序：先落盘、再改库。磁盘是真相、库是账本
+                vector<TestcaseMeta> meta;
+                if (!save_testcases_to_disk(pid, cases, meta))
+                {
+                    send_response(conn_fd, 500, "测试点写入磁盘失败\n");
+                    return;
+                }
+                if (!update_problem(pid, values, tl, ml, publish))
+                {
+                    send_response(conn_fd, 500, "保存失败，请重试\n");
+                    return;
+                }
+                if (!replace_testcases(pid, meta))
+                {
+                    send_response(conn_fd, 500, "测试点元信息保存失败，请重试\n");
+                    return;
+                }
+
+                send_redirect(conn_fd, "/admin/problems");
+                return;
+            }
+
+            // GET：把库里的字段和盘上的测试点填回表单
+            map<string, string> values;
+            values["title"] = p.title;
+            values["description"] = p.description;
+            values["input_format"] = p.input_format;
+            values["output_format"] = p.output_format;
+            values["sample_input"] = p.sample_input;
+            values["sample_output"] = p.sample_output;
+            values["time_limit_ms"] = to_string(p.time_limit_ms);
+            values["memory_limit_mb"] = to_string(p.memory_limit_mb);
+            if (p.is_published)
+            {
+                values["is_published"] = "1";
+            }
+
+            int extra_rows = 0;
+            auto it_rows = query_params.find("rows");
+            if (it_rows != query_params.end())
+            {
+                long r = 0;
+                if (to_long(it_rows->second, r) && r > 0)
+                {
+                    extra_rows = (r > 20) ? 20 : static_cast<int>(r);
+                }
+            }
+
+            vector<pair<string, string>> cases = load_testcases(pid);
+            send_response(conn_fd, 200,
+                          render_problem_form("编辑题目", action, values, "", &cases, extra_rows),
+                          "text/html; charset=utf-8");
+        }
+    }
+        // 当前登录状态（调试用）
+        else if (path == "/whoami")
+        {
+            send_response(conn_fd, 200,
+                          current_user.empty() ? "未登录\n" : current_user + "\n");
+        }
+        // 其余按静态文件处理
+        else
+        {
+            path = urldecode(path, false);
+            string road = "www" + path;
+
+            char root_buf[PATH_MAX];
+            char full_buf[PATH_MAX];
+            char *root_p = realpath("www", root_buf);
+            char *full_p = realpath(road.c_str(), full_buf);
+
+            string root, real;
+            if (root_p != NULL)
+            {
+                root = root_buf;
+            }
+            if (full_p != NULL)
+            {
+                real = full_buf;
+            }
+
+            bool ok = !root.empty() && real.compare(0, root.size() + 1, root + "/") == 0;
+            if (!ok)
+            {
+                send_response(conn_fd, 404, "请输入正确的网址\n");
+            }
+
+            else
+            {
+                ifstream f(road);
+                string ext;
+                size_t pos = road.rfind('.');
+
+                if (pos != string::npos)
+                {
+                    ext = road.substr(pos + 1, road.size() - pos);
+                }
+                auto it = content_types.find(ext);
+                string type = (it != content_types.end()) ? it->second : content_types.at("");
+
+                if (f.is_open())
+                {
+                    stringstream ss;
+                    ss << f.rdbuf();
+                    string resource = ss.str();
+                    send_response(conn_fd, 200, resource, type);
+                }
+                else
+                {
+                    send_response(conn_fd, 404, "请输入正确的网址\n");
                 }
             }
         }
     }
-    return 0;
-}
+
+    int main()
+    {
+        int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd == -1)
+        {
+            perror("socket");
+            return 1;
+        }
+
+        int opt = 1;
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(8080);
+
+        if (bind(listen_fd, (sockaddr *)&addr, sizeof(addr)) == -1)
+        {
+            perror("bind");
+            return 1;
+        }
+
+        if (listen(listen_fd, 10) == -1)
+        {
+            perror("listen");
+            return 1;
+        }
+
+        cout << "listening on 8080.....\n"
+             << flush;
+
+        fcntl(listen_fd, F_SETFL, fcntl(listen_fd, F_GETFL) | O_NONBLOCK);
+
+        int epfd = epoll_create1(0);
+
+        epoll_event ev;
+        ev.events = EPOLLIN;
+        ev.data.fd = listen_fd;
+        epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
+
+        epoll_event events[64];
+        map<int, string> conn_bufs;
+
+        thread t1(worker), t2(worker), t3(worker), t4(worker);
+        thread j1(judge_worker), j2(judge_worker);
+
+        while (true)
+        {
+            int n = epoll_wait(epfd, events, 64, -1);
+
+            for (int i = 0; i < n; i++)
+            {
+                int fd = events[i].data.fd;
+
+                if (fd == listen_fd)
+                {
+                    while (true)
+                    {
+                        int conn_fd = accept(listen_fd, NULL, NULL);
+                        if (conn_fd == -1)
+                        {
+                            break;
+                        }
+
+                        fcntl(conn_fd, F_SETFL, fcntl(conn_fd, F_GETFL) | O_NONBLOCK);
+                        ev.events = EPOLLIN;
+                        ev.data.fd = conn_fd;
+                        epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &ev);
+
+                        cout << "接到新连接 fd = " << conn_fd << "\n"
+                             << flush;
+                    }
+                }
+                else
+                {
+                    char buf[4096];
+                    ssize_t cnt = read(fd, buf, sizeof(buf));
+
+                    if (cnt > 0)
+                    {
+                        conn_bufs[fd].append(buf, cnt);
+                        cout << "fd " << fd << " 收到 " << cnt << " 字节，累积 " << conn_bufs[fd].size() << " 字节" << endl;
+
+                        size_t need = request_total_len(conn_bufs[fd]);
+                        if (need != string::npos && conn_bufs[fd].size() >= need)
+                        {
+                            string req = conn_bufs[fd];
+                            epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                            conn_bufs.erase(fd);
+                            {
+                                lock_guard<mutex> lock(mtx);
+                                task_queue.push({fd, req});
+                            }
+                            cv.notify_one();
+                        }
+                    }
+                    else if (cnt == 0)
+                    {
+                        cout << "fd " << fd << " 对方关闭，清理" << endl;
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                        conn_bufs.erase(fd);
+                        close(fd);
+                    }
+                    else
+                    {
+                        if (errno != EAGAIN && errno != EWOULDBLOCK)
+                        {
+                            perror("read");
+                        }
+                    }
+                }
+            }
+        }
+        return 0;
+    }
