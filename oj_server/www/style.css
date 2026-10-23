@@ -398,6 +398,10 @@ button:hover, .btn:hover {
   background: var(--editor-bg);
   font: 13px/1.65 var(--mono);
 }
+.editor .CodeMirror-gutters {
+  background: var(--editor-bg);
+  border-right: 0;
+}
 .editor .CodeMirror-scroll { min-height: 300px; }
 .editor .CodeMirror.CodeMirror-focused { outline: none; }
 
