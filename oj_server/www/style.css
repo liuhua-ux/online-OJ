@@ -463,6 +463,16 @@ button:hover, .btn:hover {
 }
 .editor textarea:focus { box-shadow: inset 0 0 0 2px var(--blue-soft); }
 
+/* CodeMirror 接管 textarea 之后的尺寸与字体 */
+.editor .CodeMirror {
+  height: auto;
+  min-height: 280px;
+  border-radius: 0;
+  font: 13.5px/1.7 var(--mono);
+}
+.editor .CodeMirror-scroll { min-height: 280px; }
+.editor .CodeMirror.CodeMirror-focused { box-shadow: inset 0 0 0 2px var(--blue-soft); }
+
 .editor-foot {
   display: flex;
   flex-wrap: wrap;

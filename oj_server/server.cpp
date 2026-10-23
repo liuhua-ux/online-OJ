@@ -298,7 +298,30 @@ string render_submit_form(int problem_id, const string &last_source)
            "    <button type=\"submit\">提交判题</button>\n"
            "    <span class=\"hint\">提交后在后台编译、运行、比对</span>\n"
            "  </div>\n"
-           "</form>\n";
+           "</form>\n"
+           "<script src=\"/vendor/codemirror/codemirror.min.js\"></script>\n"
+           "<script src=\"/vendor/codemirror/mode/clike.min.js\"></script>\n"
+           "<script src=\"/vendor/codemirror/addon/closebrackets.min.js\"></script>\n"
+           "<script src=\"/vendor/codemirror/addon/matchbrackets.min.js\"></script>\n"
+           "<script>\n"
+           "(function () {\n"
+           "  var ta = document.querySelector('textarea[name=code]');\n"
+           "  if (!ta || typeof CodeMirror === 'undefined') { return; }   // 脚本没加载出来就退回裸 textarea\n"
+           "  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;\n"
+           "  CodeMirror.fromTextArea(ta, {\n"
+           "    mode: 'text/x-c++src',\n"
+           "    lineNumbers: true,\n"
+           "    indentUnit: 4,\n"
+           "    tabSize: 4,\n"
+           "    indentWithTabs: false,\n"
+           "    matchBrackets: true,\n"
+           "    autoCloseBrackets: true,\n"
+           "    lineWrapping: true,\n"
+           "    theme: dark ? 'material-darker' : 'default',\n"
+           "    extraKeys: { Tab: function (cm) { cm.replaceSelection('    ', 'end'); } }\n"
+           "  });\n"
+           "})();\n"
+           "</script>\n";
 }
 
 size_t request_total_len(const string &req)
@@ -562,7 +585,9 @@ bool render_problem(int problem_id, const string &viewer, string &html)
     }
 
     stringstream page;
-    page << page_head(row[0]);
+    page << page_head(row[0],
+                      "<link rel=\"stylesheet\" href=\"/vendor/codemirror/codemirror.min.css\">\n"
+                      "<link rel=\"stylesheet\" href=\"/vendor/codemirror/theme/material-darker.min.css\">\n");
     page << "<p class=\"breadcrumb\"><a href=\"/problems\">题库</a> / 第 " << problem_id << " 题</p>\n";
 
     page << "<header class=\"problem-header\">\n";
