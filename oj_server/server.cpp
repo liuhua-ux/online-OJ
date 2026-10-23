@@ -416,7 +416,7 @@ string page_head(const string &title, const string &extra_head = "")
            extra_head +
            "<title>" +
            html_escape(title) + " · 自研 OJ</title>\n"
-                                "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231d4ed8'/></svg>\">\n"
+                                "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='3' fill='%231f2328'/></svg>\">\n"
                                 "<link rel=\"stylesheet\" href=\"/style.css\">\n"
                                 "</head>\n"
                                 "<body>\n"
@@ -446,7 +446,7 @@ string render_submit_form(int problem_id, const string &last_source)
     return "<h2>提交代码</h2>\n"
            "<form class=\"editor\" method=\"POST\" action=\"/submit/" +
            to_string(problem_id) + "\">\n"
-                                   "  <div class=\"editor-bar\"><span class=\"dot\" aria-hidden=\"true\"></span><span>submission.cpp</span><span class=\"lang\">C++17</span></div>\n"
+                                   "  <div class=\"editor-bar\"><span>submission.cpp</span><span class=\"lang\">C++17</span></div>\n"
                                    "  <textarea name=\"code\" spellcheck=\"false\" placeholder=\"在这里粘贴你的 C++ 代码\">" +
            html_escape(last_source) +
            "</textarea>\n"
@@ -463,7 +463,6 @@ string render_submit_form(int problem_id, const string &last_source)
            "(function () {\n"
            "  var ta = document.querySelector('textarea[name=code]');\n"
            "  if (!ta || typeof CodeMirror === 'undefined') { return; }   // 脚本没加载出来就退回裸 textarea\n"
-           "  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;\n"
            "  CodeMirror.fromTextArea(ta, {\n"
            "    mode: 'text/x-c++src',\n"
            "    lineNumbers: true,\n"
@@ -473,7 +472,7 @@ string render_submit_form(int problem_id, const string &last_source)
            "    matchBrackets: true,\n"
            "    autoCloseBrackets: true,\n"
            "    lineWrapping: true,\n"
-           "    theme: dark ? 'material-darker' : 'default',\n"
+           "    theme: 'material-darker',\n"
            "    extraKeys: { Tab: function (cm) { cm.replaceSelection('    ', 'end'); } }\n"
            "  });\n"
            "})();\n"
@@ -734,8 +733,7 @@ string render_problems(const string &viewer)
 
     stringstream page;
     page << page_head("题库");
-    page << "<header class=\"page-head\"><h1>题库</h1>"
-            "<p class=\"lead\">挑一道题，写完代码交上来。</p></header>\n";
+    page << "<header class=\"page-head\"><h1>题库</h1></header>\n";
 
     if (rows.empty())
     {
@@ -744,22 +742,20 @@ string render_problems(const string &viewer)
         return page.str();
     }
 
-    page << "<div class=\"list-meta\"><span>共 " << rows.size() << " 道题</span>"
-            "<span>提交前请确认时间 / 内存限制</span></div>\n";
+    page << "<div class=\"list-meta\"><span>共 " << rows.size() << " 道题</span></div>\n";
     page << "<div class=\"problem-list\">\n";
+    page << "<div class=\"list-head\"><span>题号</span><span>题目</span>"
+            "<span>时间限制</span><span>内存限制</span><span>状态</span></div>\n";
 
     for (const ProblemRowBrief &r : rows)
     {
         bool done = passed.count(r.id) > 0;
-        page << "<a class=\"problem-row" << (done ? " is-done" : "") << "\" href=\"/problem/"
-             << r.id << "\">\n"
-             << "  <span class=\"problem-id\">#" << r.id << "</span>\n"
-             << "  <span class=\"problem-main\">"
-             << "<span class=\"problem-title\">" << html_escape(r.title) << "</span>"
-             << "<span class=\"problem-meta\">" << r.tl << " ms · " << r.ml << " MB</span>"
-             << "</span>\n"
+        page << "<a class=\"problem-row\" href=\"/problem/" << r.id << "\">\n"
+             << "  <span class=\"problem-id\">" << r.id << "</span>\n"
+             << "  <span class=\"problem-title\">" << html_escape(r.title) << "</span>\n"
+             << "  <span class=\"problem-meta\">" << r.tl << " ms</span>\n"
+             << "  <span class=\"problem-meta\">" << r.ml << " MB</span>\n"
              << "  <span class=\"problem-state\">" << (done ? "已通过" : "") << "</span>\n"
-             << "  <span class=\"problem-arrow\" aria-hidden=\"true\">→</span>\n"
              << "</a>\n";
     }
 
@@ -832,9 +828,8 @@ bool render_problem(int problem_id, const string &viewer, string &html)
 
     page << "<header class=\"problem-header\">\n";
     page << "<h1>" << html_escape(row[0]) << "</h1>\n";
-    page << "<div class=\"chips\"><span class=\"chip\">时间 " << row[6] << " ms</span>"
-                                                                           "<span class=\"chip\">内存 "
-         << row[7] << " MB</span></div>\n";
+    page << "<p class=\"meta-line\"><span>时间限制 <b>" << row[6] << "</b> ms</span>"
+            "<span>内存限制 <b>" << row[7] << "</b> MB</span></p>\n";
     page << "</header>\n";
 
     page << "<div class=\"article\">\n";
@@ -1329,8 +1324,8 @@ bool render_result(const string &job_id, string &html)
 
     page << "<header class=\"problem-header\">\n";
     page << "<h1>判题结果</h1>\n";
-    page << "<div class=\"chips\"><span class=\"chip\">提交号 " << job_id
-         << "</span><span class=\"chip\">" << html_escape(created) << "</span></div>\n";
+    page << "<p class=\"meta-line\"><span>提交号 <b>" << job_id << "</b></span>"
+         << "<span>" << html_escape(created) << "</span></p>\n";
     page << "</header>\n";
 
     if (!finished)
@@ -1355,6 +1350,19 @@ bool render_result(const string &job_id, string &html)
             cls = "verdict-err";
         }
 
+        page << "<section class=\"result-card " << cls << "\">\n";
+        page << "<span class=\"verdict-badge\">"
+             << html_escape(verdict.empty() ? "—" : verdict) << "</span>\n";
+        page << "<div class=\"result-stats\">\n";
+        page << "<div><span>测试点</span><b>" << passed << " / " << total << "</b></div>\n";
+        page << "<div><span>最慢耗时</span><b>" << time_ms << " ms</b></div>\n";
+        page << "<div><span>峰值内存</span><b>" << memory << " KB</b></div>\n";
+        page << "</div>\n";
+        page << "</section>\n";
+
+        page << "<h2>判题器输出</h2>\n";
+        page << "<pre class=\"result-output\">" << html_escape(raw) << "</pre>\n";
+
         page << "<h2>提交的源码</h2>\n";
         if (source.empty())
         {
@@ -1364,22 +1372,9 @@ bool render_result(const string &job_id, string &html)
         {
             page << "<pre class=\"result-output\">" << html_escape(source) << "</pre>\n";
         }
-
-        page << "<section class=\"result-card\">\n";
-        page << "<div class=\"verdict-badge " << cls << "\">"
-             << html_escape(verdict.empty() ? "—" : verdict) << "</div>\n";
-        page << "<div class=\"result-stats\">\n";
-        page << "<div><b>" << passed << " / " << total << "</b><span>测试点</span></div>\n";
-        page << "<div><b>" << time_ms << "</b><span>最慢耗时 (ms)</span></div>\n";
-        page << "<div><b>" << memory << "</b><span>峰值内存 (KB)</span></div>\n";
-        page << "</div>\n";
-        page << "</section>\n";
-
-        page << "<h2>判题器输出</h2>\n";
-        page << "<pre class=\"result-output\">" << html_escape(raw) << "</pre>\n";
     }
 
-    page << "<p class=\"note\"><a href=\"/problem/" << prob_id
+    page << "<p><a href=\"/problem/" << prob_id
          << "\">← 回题目</a>　<a href=\"/problems\">题库</a></p>\n";
     page << page_tail();
 
@@ -2034,7 +2029,7 @@ string render_problem_form(const string &heading, const string &action,
 
     page << "<form class=\"form\" method=\"POST\" action=\"" << action << "\">\n";
 
-    page << "<p>标题<br><input name=\"title\" size=\"60\" value=\""
+    page << "<p>标题<br><input name=\"title\" value=\""
          << html_escape(field_value(v, "title")) << "\"></p>\n";
 
     page << "<p>题目描述<br><textarea name=\"description\" rows=\"8\" cols=\"80\">"
