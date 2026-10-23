@@ -64,8 +64,9 @@ const string RESULT_PREFIX = "/result/";
 // 同一台 Redis 是共享命名空间：键一样但格式不同 → 双方解析都失败、互相覆盖，缓存白做。
 // 二期用独立的键，两期可以并存对照。
 const string RANK_CACHE_KEY = "oj:rank:v2";
-const int RANK_CACHE_TTL = 60;         // 秒
-const int REDIS_TIMEOUT_US = 200000;   // 200ms：Redis 挂了也不能让页面一起卡死
+const int RANK_CACHE_TTL = 60;       // 秒
+const int REDIS_TIMEOUT_US = 200000; // 200ms：Redis 挂了也不能让页面一起卡死
+const string ADMIN_PREFIX = "/admin/";
 
 const map<string, string>
     content_types = {
@@ -236,6 +237,8 @@ string html_escape(const string &page)
     return out;
 }
 
+bool user_is_admin(const string &username);
+
 string nav_right()
 {
     if (nav_user.empty())
@@ -243,8 +246,15 @@ string nav_right()
         return "    <a href=\"/login\">登录</a>\n"
                "    <a href=\"/register\">注册</a>\n";
     }
+    // 管理员才显示「管理」入口。每次现查库 —— 权限不放进 cookie（签出去的票收不回来）
+    string admin_link;
+    if (user_is_admin(nav_user))
+    {
+        admin_link = "    <a href=\"/admin/problems\">管理</a>\n";
+    }
     return "    <a href=\"/submissions\">我的提交</a>\n"
-           "    <a href=\"/rank\">排行榜</a>\n"
+           "    <a href=\"/rank\">排行榜</a>\n" +
+           admin_link +
            "    <a href=\"/profile\">" +
            html_escape(nav_user) + "</a>\n"
                                    "    <a href=\"/logout\">退出</a>\n";
@@ -689,6 +699,28 @@ bool user_is_admin(const string &username)
     return admin;
 }
 
+// 管理页统一守卫。true = 放行；false = 已经替你把响应发了（302 或 403）
+bool admin_guard(int conn_fd, const string &current_user)
+{
+    if (current_user.empty())
+    {
+        send_redirect(conn_fd, "/login");
+        return false;
+    }
+
+    if (!user_is_admin(current_user))
+    {
+        stringstream page;
+        page << page_head("没有权限")
+             << "<p class=\"empty\">需要管理员权限。</p>\n"
+             << page_tail();
+        send_response(conn_fd, 403, page.str(), "text/html; charset=utf-8");
+        return false;
+    }
+
+    return true;
+}
+
 string render_submissions(const string &viewer, const string &filter_user)
 {
     bool admin = user_is_admin(viewer);
@@ -1006,7 +1038,6 @@ string render_rank()
     return page.str();
 }
 
-
 bool render_result(const string &job_id, string &html)
 {
     MYSQL *conn = get_conn();
@@ -1274,6 +1305,82 @@ int count_testcases(int problem_id)
 
     mysql_free_result(res);
     return n;
+}
+
+string render_admin_problems()
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return page_head("题目管理") +
+               "<p class=\"empty\">数据库暂时不可用。</p>\n" + page_tail();
+    }
+
+    // 管理页要看全部：未发布的、已软删除的都得列出来（学生侧才加那两个 WHERE）
+    if (mysql_query(conn, "SELECT problem_id, title, is_published, is_deleted "
+                          "FROM problems ORDER BY problem_id") != 0)
+    {
+        cerr << "admin list failed: " << mysql_error(conn) << endl;
+        return page_head("题目管理") +
+               "<p class=\"empty\">题库暂时读不出来。</p>\n" + page_tail();
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == NULL)
+    {
+        return page_head("题目管理") +
+               "<p class=\"empty\">题库暂时读不出来。</p>\n" + page_tail();
+    }
+
+    stringstream page;
+    page << page_head("题目管理");
+    page << "<header class=\"page-head\"><h1>题目管理</h1>"
+            "<p class=\"lead\">这里能看见未发布和已删除的题 —— 学生看不到。</p></header>\n";
+    page << "<p><a href=\"/admin/problem/new\">＋ 新建题目</a></p>\n";
+
+    page << "<table class=\"sub-table\">\n";
+    page << "<tr><th>题号</th><th>标题</th><th>状态</th><th>测试点</th><th>操作</th></tr>\n";
+
+    int count = 0;
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res)) != NULL)
+    {
+        int pid = stoi(row[0]);
+        bool published = (row[2] != NULL && string(row[2]) == "1");
+        bool deleted = (row[3] != NULL && string(row[3]) == "1");
+
+        string state;
+        string action;
+        if (deleted)
+        {
+            state = "已删除（软删除）";
+            action = "—";
+        }
+        else
+        {
+            state = published ? "已发布" : "草稿（学生看不到）";
+            action = "<a href=\"/admin/problem/" + to_string(pid) + "/edit\">编辑</a>";
+        }
+
+        page << "<tr>"
+             << "<td>" << pid << "</td>"
+             << "<td>" << html_escape(row[1] ? row[1] : "") << "</td>"
+             << "<td>" << state << "</td>"
+             << "<td>" << count_testcases(pid) << "</td>"
+             << "<td>" << action << "</td>"
+             << "</tr>\n";
+        count++;
+    }
+
+    page << "</table>\n";
+    if (count == 0)
+    {
+        page << "<p class=\"empty\">还没有题目。</p>\n";
+    }
+    page << page_tail();
+
+    mysql_free_result(res);
+    return page.str();
 }
 
 void judge_worker()
@@ -1942,6 +2049,24 @@ void handle_request(int conn_fd, const string &req)
             return;
         }
         send_response(conn_fd, 200, render_rank(), "text/html; charset=utf-8");
+    }
+    // 管理后台：整个 /admin/ 子树一个门卫，以后加页面不用再各写一遍权限检查
+    else if (path.compare(0, ADMIN_PREFIX.size(), ADMIN_PREFIX) == 0)
+    {
+        if (!admin_guard(conn_fd, current_user))
+        {
+            return;
+        }
+
+        if (path == "/admin/problems")
+        {
+            send_response(conn_fd, 200, render_admin_problems(),
+                          "text/html; charset=utf-8");
+        }
+        else
+        {
+            send_response(conn_fd, 404, "没有这个管理页面\n");
+        }
     }
     // 当前登录状态（调试用）
     else if (path == "/whoami")
