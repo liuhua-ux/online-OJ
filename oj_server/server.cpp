@@ -1599,6 +1599,192 @@ bool update_problem(int problem_id, const map<string, string> &v, int tl_ms, int
     return true;
 }
 
+struct UserRow
+{
+    int user_id = 0;
+    string username;
+    bool is_admin = false;
+    bool is_disabled = false;
+    string created_at;
+};
+
+vector<UserRow> list_users()
+{
+    vector<UserRow> rows;
+
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return rows;
+    }
+
+    if (mysql_query(conn, "SELECT user_id, username, is_admin, is_disabled, created_at "
+                          "FROM users ORDER BY user_id") != 0)
+    {
+        cerr << "list_users failed: " << mysql_error(conn) << endl;
+        return rows;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+    {
+        return rows;
+    }
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res)) != NULL)
+    {
+        UserRow u;
+        u.user_id = stoi(row[0]);
+        u.username = row[1] ? row[1] : "";
+        u.is_admin = (row[2] != nullptr && string(row[2]) == "1");
+        u.is_disabled = (row[3] != nullptr && string(row[3]) == "1");
+        u.created_at = row[4] ? row[4] : "";
+        rows.push_back(u);
+    }
+
+    mysql_free_result(res);
+    return rows;
+}
+
+// 管理页的操作一律走数字主键：用户名可能含空格等字符，塞进 URL 还要再编码
+bool get_user_by_id(int user_id, UserRow &u)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string sql = "SELECT user_id, username, is_admin, is_disabled, created_at "
+                 "FROM users WHERE user_id = " +
+                 to_string(user_id);
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        return false;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+    {
+        return false;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    bool found = (row != nullptr);
+    if (found)
+    {
+        u.user_id = stoi(row[0]);
+        u.username = row[1] ? row[1] : "";
+        u.is_admin = (row[2] != nullptr && string(row[2]) == "1");
+        u.is_disabled = (row[3] != nullptr && string(row[3]) == "1");
+        u.created_at = row[4] ? row[4] : "";
+    }
+
+    mysql_free_result(res);
+    return found;
+}
+
+int count_active_admins()
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return 0;
+    }
+
+    if (mysql_query(conn, "SELECT COUNT(*) FROM users "
+                          "WHERE is_admin = 1 AND is_disabled = 0") != 0)
+    {
+        return 0;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+    {
+        return 0;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    int n = (row != NULL && row[0] != NULL) ? stoi(row[0]) : 0;
+    mysql_free_result(res);
+    return n;
+}
+
+bool set_user_password(int user_id, const string &hash)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string sql = "UPDATE users SET password_hash = '" + escape_sql(hash) +
+                 "' WHERE user_id = " + to_string(user_id);
+    return mysql_query(conn, sql.c_str()) == 0;
+}
+
+bool set_user_disabled(int user_id, bool disabled)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string sql = "UPDATE users SET is_disabled = " + to_string(disabled ? 1 : 0) +
+                 " WHERE user_id = " + to_string(user_id);
+    return mysql_query(conn, sql.c_str()) == 0;
+}
+
+bool set_user_admin(int user_id, bool admin)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return false;
+    }
+
+    string sql = "UPDATE users SET is_admin = " + to_string(admin ? 1 : 0) +
+                 " WHERE user_id = " + to_string(user_id);
+    return mysql_query(conn, sql.c_str()) == 0;
+}
+
+// 从 "/admin/user/7/toggle_admin" 抠出 7 和 "toggle_admin"
+bool parse_admin_user_path(const string &path, int &user_id, string &action)
+{
+    const string prefix = "/admin/user/";
+    if (path.compare(0, prefix.size(), prefix) != 0)
+    {
+        return false;
+    }
+
+    string rest = path.substr(prefix.size());
+    size_t slash = rest.find('/');
+    if (slash == string::npos)
+    {
+        return false;
+    }
+
+    string num = rest.substr(0, slash);
+    action = rest.substr(slash + 1);
+
+    if (num.empty() || num.find_first_not_of("0123456789") != string::npos)
+    {
+        return false;
+    }
+
+    try
+    {
+        user_id = stoi(num);
+    }
+    catch (const exception &)
+    {
+        return false;
+    }
+    return true;
+}
+
 // 从 "/admin/problem/12/edit" 抠出 12 和 "edit"；不是这个形状返回 false
 bool parse_admin_problem_path(const string &path, int &problem_id, string &action)
 {
@@ -1762,7 +1948,8 @@ string render_admin_problems()
     page << page_head("题目管理");
     page << "<header class=\"page-head\"><h1>题目管理</h1>"
             "<p class=\"lead\">这里能看见未发布和已删除的题 —— 学生看不到。</p></header>\n";
-    page << "<p><a href=\"/admin/problem/new\">＋ 新建题目</a></p>\n";
+    page << "<p><a href=\"/admin/problem/new\">+ 新建题目</a> "
+            "<a href=\"/admin/users\">用户管理 →</a></p>\n";
 
     page << "<table class=\"sub-table\">\n";
     page << "<tr><th>题号</th><th>标题</th><th>状态</th><th>测试点</th><th>操作</th></tr>\n";
@@ -1806,6 +1993,65 @@ string render_admin_problems()
     page << page_tail();
 
     mysql_free_result(res);
+    return page.str();
+}
+
+string render_admin_users(const string &me)
+{
+    vector<UserRow> rows = list_users();
+
+    stringstream page;
+    page << page_head("用户管理");
+    page << "<header class=\"page-head\"><h1>用户管理</h1>"
+            "<p class=\"lead\">重置口令、禁用账号、授予或收回管理员。</p></header>\n";
+    page << "<p><a href=\"/admin/problems\">← 题目管理</a></p>\n";
+
+    page << "<table class=\"sub-table\">\n";
+    page << "<tr><th>用户名</th><th>角色</th><th>状态</th><th>注册时间</th>"
+            "<th>重置口令</th><th>操作</th></tr>\n";
+
+    for (const UserRow &u : rows)
+    {
+        string role = u.is_admin ? "管理员" : "学生";
+        string state = u.is_disabled ? "已禁用" : "正常";
+
+        page << "<tr><td>" << html_escape(u.username) << "</td>"
+             << "<td>" << role << "</td>";
+
+        if (u.username == me)
+        {
+            // 不能对自己操作：禁用自己 / 收回自己的管理员 = 把自己的钥匙拆了
+            page << "<td>" << state << "（你自己）</td>"
+                 << "<td>" << html_escape(u.created_at) << "</td>"
+                 << "<td>—</td><td>不能对自己操作</td>";
+        }
+        else
+        {
+            string uid = to_string(u.user_id);
+
+            page << "<td>" << state << "</td>"
+                 << "<td>" << html_escape(u.created_at) << "</td>";
+
+            page << "<td><form method=\"POST\" action=\"/admin/user/" << uid
+                 << "/reset_password\" style=\"display:inline\">"
+                    "<input name=\"new_password\" type=\"password\" size=\"10\" placeholder=\"新口令\">"
+                    "<button type=\"submit\">重置</button></form></td>";
+
+            page << "<td>"
+                 << "<form method=\"POST\" action=\"/admin/user/" << uid
+                 << "/toggle_disabled\" style=\"display:inline\"><button type=\"submit\">"
+                 << (u.is_disabled ? "解禁" : "禁用") << "</button></form>　"
+                 << "<form method=\"POST\" action=\"/admin/user/" << uid
+                 << "/toggle_admin\" style=\"display:inline\"><button type=\"submit\">"
+                 << (u.is_admin ? "收回管理员" : "设为管理员") << "</button></form>"
+                 << "</td>";
+        }
+
+        page << "</tr>\n";
+    }
+
+    page << "</table>\n";
+    page << page_tail();
     return page.str();
 }
 
@@ -2489,6 +2735,11 @@ void handle_request(int conn_fd, const string &req)
             send_response(conn_fd, 200, render_admin_problems(),
                           "text/html; charset=utf-8");
         }
+        else if (path == "/admin/users")
+        {
+            send_response(conn_fd, 200, render_admin_users(current_user),
+                          "text/html; charset=utf-8");
+        }
         else if (path == "/admin/problem/new")
         {
             if (method == "POST")
@@ -2574,6 +2825,84 @@ void handle_request(int conn_fd, const string &req)
         }
         else
         {
+            int uid = 0;
+            string uact;
+            if (parse_admin_user_path(path, uid, uact))
+            {
+                if (method != "POST")
+                {
+                    send_response(conn_fd, 405, "这个操作必须用 POST\n");
+                    return;
+                }
+
+                UserRow u;
+                if (!get_user_by_id(uid, u))
+                {
+                    send_response(conn_fd, 404, "没有这个用户\n");
+                    return;
+                }
+                if (u.username == current_user)
+                {
+                    send_response(conn_fd, 400, "不能对自己操作\n");
+                    return;
+                }
+
+                if (uact == "reset_password")
+                {
+                    // 「遗忘口令由管理员重置」—— 这条路不要求原口令
+                    string new_pw = field_value(form, "new_password");
+                    if (new_pw.empty())
+                    {
+                        send_response(conn_fd, 400, "新口令不能为空\n");
+                        return;
+                    }
+
+                    string hash = make_password_hash(new_pw);
+                    if (hash.empty() || !set_user_password(uid, hash))
+                    {
+                        send_response(conn_fd, 500, "重置失败，请重试\n");
+                        return;
+                    }
+
+                    send_redirect(conn_fd, "/admin/users");
+                    return;
+                }
+
+                if (uact == "toggle_disabled")
+                {
+                    // 兜底：至少保留一个可用管理员。
+                    // 其实「不能对自己操作」已经把这条兜住了（按当前路径触发不了），留着防将来放开
+                    if (!u.is_disabled && u.is_admin && count_active_admins() <= 1)
+                    {
+                        send_response(conn_fd, 400, "这是最后一个可用的管理员，不能禁用\n");
+                        return;
+                    }
+
+                    if (!set_user_disabled(uid, !u.is_disabled))
+                    {
+                        send_response(conn_fd, 500, "操作失败，请重试\n");
+                        return;
+                    }
+
+                    send_redirect(conn_fd, "/admin/users");
+                    return;
+                }
+
+                if (uact == "toggle_admin")
+                {
+                    if (!set_user_admin(uid, !u.is_admin))
+                    {
+                        send_response(conn_fd, 500, "操作失败，请重试\n");
+                        return;
+                    }
+
+                    send_redirect(conn_fd, "/admin/users");
+                    return;
+                }
+
+                send_response(conn_fd, 404, "没有这个管理页面\n");
+                return;
+            }
             int pid = 0;
             string act;
             if (!parse_admin_problem_path(path, pid, act))
@@ -2777,181 +3106,181 @@ void handle_request(int conn_fd, const string &req)
                           "text/html; charset=utf-8");
         }
     }
-        // 当前登录状态（调试用）
-        else if (path == "/whoami")
+    // 当前登录状态（调试用）
+    else if (path == "/whoami")
+    {
+        send_response(conn_fd, 200,
+                      current_user.empty() ? "未登录\n" : current_user + "\n");
+    }
+    // 其余按静态文件处理
+    else
+    {
+        path = urldecode(path, false);
+        string road = "www" + path;
+
+        char root_buf[PATH_MAX];
+        char full_buf[PATH_MAX];
+        char *root_p = realpath("www", root_buf);
+        char *full_p = realpath(road.c_str(), full_buf);
+
+        string root, real;
+        if (root_p != NULL)
         {
-            send_response(conn_fd, 200,
-                          current_user.empty() ? "未登录\n" : current_user + "\n");
+            root = root_buf;
         }
-        // 其余按静态文件处理
+        if (full_p != NULL)
+        {
+            real = full_buf;
+        }
+
+        bool ok = !root.empty() && real.compare(0, root.size() + 1, root + "/") == 0;
+        if (!ok)
+        {
+            send_response(conn_fd, 404, "请输入正确的网址\n");
+        }
+
         else
         {
-            path = urldecode(path, false);
-            string road = "www" + path;
+            ifstream f(road);
+            string ext;
+            size_t pos = road.rfind('.');
 
-            char root_buf[PATH_MAX];
-            char full_buf[PATH_MAX];
-            char *root_p = realpath("www", root_buf);
-            char *full_p = realpath(road.c_str(), full_buf);
-
-            string root, real;
-            if (root_p != NULL)
+            if (pos != string::npos)
             {
-                root = root_buf;
+                ext = road.substr(pos + 1, road.size() - pos);
             }
-            if (full_p != NULL)
-            {
-                real = full_buf;
-            }
+            auto it = content_types.find(ext);
+            string type = (it != content_types.end()) ? it->second : content_types.at("");
 
-            bool ok = !root.empty() && real.compare(0, root.size() + 1, root + "/") == 0;
-            if (!ok)
+            if (f.is_open())
+            {
+                stringstream ss;
+                ss << f.rdbuf();
+                string resource = ss.str();
+                send_response(conn_fd, 200, resource, type);
+            }
+            else
             {
                 send_response(conn_fd, 404, "请输入正确的网址\n");
             }
+        }
+    }
+}
 
+int main()
+{
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd == -1)
+    {
+        perror("socket");
+        return 1;
+    }
+
+    int opt = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(8080);
+
+    if (bind(listen_fd, (sockaddr *)&addr, sizeof(addr)) == -1)
+    {
+        perror("bind");
+        return 1;
+    }
+
+    if (listen(listen_fd, 10) == -1)
+    {
+        perror("listen");
+        return 1;
+    }
+
+    cout << "listening on 8080.....\n"
+         << flush;
+
+    fcntl(listen_fd, F_SETFL, fcntl(listen_fd, F_GETFL) | O_NONBLOCK);
+
+    int epfd = epoll_create1(0);
+
+    epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = listen_fd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
+
+    epoll_event events[64];
+    map<int, string> conn_bufs;
+
+    thread t1(worker), t2(worker), t3(worker), t4(worker);
+    thread j1(judge_worker), j2(judge_worker);
+
+    while (true)
+    {
+        int n = epoll_wait(epfd, events, 64, -1);
+
+        for (int i = 0; i < n; i++)
+        {
+            int fd = events[i].data.fd;
+
+            if (fd == listen_fd)
+            {
+                while (true)
+                {
+                    int conn_fd = accept(listen_fd, NULL, NULL);
+                    if (conn_fd == -1)
+                    {
+                        break;
+                    }
+
+                    fcntl(conn_fd, F_SETFL, fcntl(conn_fd, F_GETFL) | O_NONBLOCK);
+                    ev.events = EPOLLIN;
+                    ev.data.fd = conn_fd;
+                    epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &ev);
+
+                    cout << "接到新连接 fd = " << conn_fd << "\n"
+                         << flush;
+                }
+            }
             else
             {
-                ifstream f(road);
-                string ext;
-                size_t pos = road.rfind('.');
+                char buf[4096];
+                ssize_t cnt = read(fd, buf, sizeof(buf));
 
-                if (pos != string::npos)
+                if (cnt > 0)
                 {
-                    ext = road.substr(pos + 1, road.size() - pos);
-                }
-                auto it = content_types.find(ext);
-                string type = (it != content_types.end()) ? it->second : content_types.at("");
+                    conn_bufs[fd].append(buf, cnt);
+                    cout << "fd " << fd << " 收到 " << cnt << " 字节，累积 " << conn_bufs[fd].size() << " 字节" << endl;
 
-                if (f.is_open())
-                {
-                    stringstream ss;
-                    ss << f.rdbuf();
-                    string resource = ss.str();
-                    send_response(conn_fd, 200, resource, type);
-                }
-                else
-                {
-                    send_response(conn_fd, 404, "请输入正确的网址\n");
-                }
-            }
-        }
-    }
-
-    int main()
-    {
-        int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (listen_fd == -1)
-        {
-            perror("socket");
-            return 1;
-        }
-
-        int opt = 1;
-        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
-        addr.sin_port = htons(8080);
-
-        if (bind(listen_fd, (sockaddr *)&addr, sizeof(addr)) == -1)
-        {
-            perror("bind");
-            return 1;
-        }
-
-        if (listen(listen_fd, 10) == -1)
-        {
-            perror("listen");
-            return 1;
-        }
-
-        cout << "listening on 8080.....\n"
-             << flush;
-
-        fcntl(listen_fd, F_SETFL, fcntl(listen_fd, F_GETFL) | O_NONBLOCK);
-
-        int epfd = epoll_create1(0);
-
-        epoll_event ev;
-        ev.events = EPOLLIN;
-        ev.data.fd = listen_fd;
-        epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
-
-        epoll_event events[64];
-        map<int, string> conn_bufs;
-
-        thread t1(worker), t2(worker), t3(worker), t4(worker);
-        thread j1(judge_worker), j2(judge_worker);
-
-        while (true)
-        {
-            int n = epoll_wait(epfd, events, 64, -1);
-
-            for (int i = 0; i < n; i++)
-            {
-                int fd = events[i].data.fd;
-
-                if (fd == listen_fd)
-                {
-                    while (true)
+                    size_t need = request_total_len(conn_bufs[fd]);
+                    if (need != string::npos && conn_bufs[fd].size() >= need)
                     {
-                        int conn_fd = accept(listen_fd, NULL, NULL);
-                        if (conn_fd == -1)
-                        {
-                            break;
-                        }
-
-                        fcntl(conn_fd, F_SETFL, fcntl(conn_fd, F_GETFL) | O_NONBLOCK);
-                        ev.events = EPOLLIN;
-                        ev.data.fd = conn_fd;
-                        epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &ev);
-
-                        cout << "接到新连接 fd = " << conn_fd << "\n"
-                             << flush;
-                    }
-                }
-                else
-                {
-                    char buf[4096];
-                    ssize_t cnt = read(fd, buf, sizeof(buf));
-
-                    if (cnt > 0)
-                    {
-                        conn_bufs[fd].append(buf, cnt);
-                        cout << "fd " << fd << " 收到 " << cnt << " 字节，累积 " << conn_bufs[fd].size() << " 字节" << endl;
-
-                        size_t need = request_total_len(conn_bufs[fd]);
-                        if (need != string::npos && conn_bufs[fd].size() >= need)
-                        {
-                            string req = conn_bufs[fd];
-                            epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-                            conn_bufs.erase(fd);
-                            {
-                                lock_guard<mutex> lock(mtx);
-                                task_queue.push({fd, req});
-                            }
-                            cv.notify_one();
-                        }
-                    }
-                    else if (cnt == 0)
-                    {
-                        cout << "fd " << fd << " 对方关闭，清理" << endl;
+                        string req = conn_bufs[fd];
                         epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                         conn_bufs.erase(fd);
-                        close(fd);
-                    }
-                    else
-                    {
-                        if (errno != EAGAIN && errno != EWOULDBLOCK)
                         {
-                            perror("read");
+                            lock_guard<mutex> lock(mtx);
+                            task_queue.push({fd, req});
                         }
+                        cv.notify_one();
+                    }
+                }
+                else if (cnt == 0)
+                {
+                    cout << "fd " << fd << " 对方关闭，清理" << endl;
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    conn_bufs.erase(fd);
+                    close(fd);
+                }
+                else
+                {
+                    if (errno != EAGAIN && errno != EWOULDBLOCK)
+                    {
+                        perror("read");
                     }
                 }
             }
         }
-        return 0;
     }
+    return 0;
+}
