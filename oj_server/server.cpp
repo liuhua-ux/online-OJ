@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <ctime>
+#include <set>
 
 using namespace std;
 
@@ -348,30 +349,61 @@ string html_escape(const string &page)
 
 bool user_is_admin(const string &username);
 
+// 当前请求路径，只用来给导航栏高亮（thread_local，同 nav_user）
+thread_local string nav_path;
+
+bool nav_is_active(const string &href)
+{
+    if (nav_path == href)
+    {
+        return true;
+    }
+    if (href == "/problems" && nav_path.compare(0, 9, "/problem/") == 0)
+    {
+        return true;
+    }
+    if (href == "/submissions" && nav_path.compare(0, 8, "/result/") == 0)
+    {
+        return true;
+    }
+    if (href == "/admin/problems" && nav_path.compare(0, 7, "/admin/") == 0)
+    {
+        return true;
+    }
+    return false;
+}
+
+string nav_link(const string &href, const string &label)
+{
+    string cls = nav_is_active(href) ? " class=\"active\"" : "";
+    return "    <a href=\"" + href + "\"" + cls + ">" + label + "</a>\n";
+}
+
 string nav_right()
 {
     if (nav_user.empty())
     {
         // 关了自助注册就别放一个点进去 403 的链接
-        if (!ALLOW_REGISTRATION)
+        string out = nav_link("/login", "登录");
+        if (ALLOW_REGISTRATION)
         {
-            return "    <a href=\"/login\">登录</a>\n";
+            out += nav_link("/register", "注册");
         }
-        return "    <a href=\"/login\">登录</a>\n"
-               "    <a href=\"/register\">注册</a>\n";
+        return out;
     }
+
     // 管理员才显示「管理」入口。每次现查库 —— 权限不放进 cookie（签出去的票收不回来）
     string admin_link;
     if (user_is_admin(nav_user))
     {
-        admin_link = "    <a href=\"/admin/problems\">管理</a>\n";
+        admin_link = nav_link("/admin/problems", "管理");
     }
-    return "    <a href=\"/submissions\">我的提交</a>\n"
-           "    <a href=\"/rank\">排行榜</a>\n" +
+
+    return nav_link("/submissions", "我的提交") +
+           nav_link("/rank", "排行榜") +
            admin_link +
-           "    <a href=\"/profile\">" +
-           html_escape(nav_user) + "</a>\n"
-                                   "    <a href=\"/logout\">退出</a>\n";
+           nav_link("/profile", html_escape(nav_user)) +
+           nav_link("/logout", "退出");
 }
 
 string page_head(const string &title, const string &extra_head = "")
@@ -390,11 +422,11 @@ string page_head(const string &title, const string &extra_head = "")
                                 "<body>\n"
                                 "<header class=\"nav\">\n"
                                 "  <a class=\"brand\" href=\"/\"><span class=\"brand-mark\" aria-hidden=\"true\">{ }</span>自研 OJ</a>\n"
-                                "  <nav>\n"
-                                "    <a href=\"/\">首页</a>\n"
-                                "    <a href=\"/problems\">题库</a>\n"
-                                "    <a href=\"/about.html\">关于</a>\n"
-                                "    <a href=\"/echo\">回显测试</a>\n" +
+                                "  <nav>\n" +
+           nav_link("/", "首页") +
+           nav_link("/problems", "题库") +
+           nav_link("/about.html", "关于") +
+           nav_link("/echo", "回显测试") +
            nav_right() +
            "  </nav>\n"
            "</header>\n"
@@ -632,7 +664,7 @@ JudgeSummary parse_judge(const string &out)
     return s;
 }
 
-string render_problems()
+string render_problems(const string &viewer)
 {
     MYSQL *conn = get_conn();
     if (conn == nullptr)
@@ -653,32 +685,86 @@ string render_problems()
         return page_head("题库") + "<p class=\"empty\">题库暂时读不出来。</p>\n" + page_tail();
     }
 
+    struct ProblemRowBrief
+    {
+        int id;
+        string title;
+        string tl;
+        string ml;
+    };
+    vector<ProblemRowBrief> rows;
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res)) != NULL)
+    {
+        ProblemRowBrief r;
+        r.id = stoi(row[0]);
+        r.title = row[1] ? row[1] : "";
+        r.tl = row[2] ? row[2] : "-";
+        r.ml = row[3] ? row[3] : "-";
+        rows.push_back(r);
+    }
+    mysql_free_result(res); // 先释放，才能在同一条连接上发下一条查询
+
+    // 登录了就标出「已通过」的题
+    set<int> passed;
+    if (!viewer.empty())
+    {
+        string q = "SELECT DISTINCT problem_id FROM submissions "
+                   "WHERE username = '" +
+                   escape_sql(viewer) +
+                   "' AND verdict = 'AC' AND problem_id IS NOT NULL";
+        if (mysql_query(conn, q.c_str()) == 0)
+        {
+            MYSQL_RES *pr = mysql_store_result(conn);
+            if (pr != nullptr)
+            {
+                MYSQL_ROW prow;
+                while ((prow = mysql_fetch_row(pr)) != NULL)
+                {
+                    if (prow[0] != nullptr)
+                    {
+                        passed.insert(stoi(prow[0]));
+                    }
+                }
+                mysql_free_result(pr);
+            }
+        }
+    }
+
     stringstream page;
     page << page_head("题库");
     page << "<header class=\"page-head\"><h1>题库</h1>"
             "<p class=\"lead\">挑一道题，写完代码交上来。</p></header>\n";
+
+    if (rows.empty())
+    {
+        page << "<p class=\"empty\">暂无已发布的题目。</p>\n";
+        page << page_tail();
+        return page.str();
+    }
+
+    page << "<div class=\"list-meta\"><span>共 " << rows.size() << " 道题</span>"
+            "<span>提交前请确认时间 / 内存限制</span></div>\n";
     page << "<div class=\"problem-list\">\n";
 
-    int count = 0;
-    MYSQL_ROW row;
-    while ((row = mysql_fetch_row(res)) != NULL)
+    for (const ProblemRowBrief &r : rows)
     {
-        page << "<a class=\"problem-row\" href=\"/problem/" << row[0] << "\">"
-             << "<span class=\"problem-id\">#" << row[0] << "</span>"
-             << "<span class=\"problem-title\">" << html_escape(row[1]) << "</span>"
-             << "<span class=\"problem-meta\">" << row[2] << " ms / " << row[3] << " MB</span>"
+        bool done = passed.count(r.id) > 0;
+        page << "<a class=\"problem-row" << (done ? " is-done" : "") << "\" href=\"/problem/"
+             << r.id << "\">\n"
+             << "  <span class=\"problem-id\">#" << r.id << "</span>\n"
+             << "  <span class=\"problem-main\">"
+             << "<span class=\"problem-title\">" << html_escape(r.title) << "</span>"
+             << "<span class=\"problem-meta\">" << r.tl << " ms · " << r.ml << " MB</span>"
+             << "</span>\n"
+             << "  <span class=\"problem-state\">" << (done ? "已通过" : "") << "</span>\n"
+             << "  <span class=\"problem-arrow\" aria-hidden=\"true\">→</span>\n"
              << "</a>\n";
-        count++;
     }
 
     page << "</div>\n";
-    if (count == 0)
-    {
-        page << "<p class=\"empty\">暂无已发布的题目。</p>\n";
-    }
     page << page_tail();
-
-    mysql_free_result(res);
     return page.str();
 }
 
@@ -1171,7 +1257,12 @@ string render_rank()
              << "<tr><th>名次</th><th>用户</th><th>通过题数</th></tr>\n";
         for (size_t i = 0; i < rows.size(); i++)
         {
-            page << "<tr><td>" << (i + 1) << "</td>"
+            string rank_cls;
+            if (i < 3)
+            {
+                rank_cls = " class=\"rank-" + to_string(i + 1) + "\"";
+            }
+            page << "<tr" << rank_cls << "><td>" << (i + 1) << "</td>"
                  << "<td>" << html_escape(rows[i].first) << "</td>"
                  << "<td>" << rows[i].second << "</td></tr>\n";
         }
@@ -2124,14 +2215,14 @@ string render_admin_users(const string &me)
             page << "<td><form method=\"POST\" action=\"/admin/user/" << uid
                  << "/reset_password\" style=\"display:inline\">"
                     "<input name=\"new_password\" type=\"password\" size=\"10\" placeholder=\"新口令\">"
-                    "<button type=\"submit\">重置</button></form></td>";
+                    "<button type=\"submit\" class=\"btn-ghost\">重置</button></form></td>";
 
             page << "<td>"
                  << "<form method=\"POST\" action=\"/admin/user/" << uid
-                 << "/toggle_disabled\" style=\"display:inline\"><button type=\"submit\">"
+                 << "/toggle_disabled\" style=\"display:inline\"><button type=\"submit\" class=\"btn-ghost\">"
                  << (u.is_disabled ? "解禁" : "禁用") << "</button></form>　"
                  << "<form method=\"POST\" action=\"/admin/user/" << uid
-                 << "/toggle_admin\" style=\"display:inline\"><button type=\"submit\">"
+                 << "/toggle_admin\" style=\"display:inline\"><button type=\"submit\" class=\"btn-ghost\">"
                  << (u.is_admin ? "收回管理员" : "设为管理员") << "</button></form>"
                  << "</td>";
         }
@@ -2214,6 +2305,8 @@ void handle_request(int conn_fd, const string &req)
         path = target;
         query = "";
     }
+    nav_path = path;
+
     cout << "method  = " << method << endl;
     cout << "target  = " << target << endl;
     cout << "version = " << version << endl;
@@ -2309,10 +2402,49 @@ void handle_request(int conn_fd, const string &req)
     // 首页
     if (path == "/")
     {
-        ifstream f("www/index.html");
-        stringstream ss;
-        ss << f.rdbuf();
-        string home = ss.str();
+        string home = read_text_file("www/index.html");
+
+        // 首页的三个数字现查；查不到就显示「—」，不影响页面
+        string n_prob = "—";
+        string n_sub = "—";
+        string n_user = "—";
+
+        MYSQL *conn = get_conn();
+        if (conn != nullptr &&
+            mysql_query(conn,
+                        "SELECT "
+                        "(SELECT COUNT(*) FROM problems WHERE is_deleted = 0 AND is_published = 1), "
+                        "(SELECT COUNT(*) FROM submissions), "
+                        "(SELECT COUNT(*) FROM users)") == 0)
+        {
+            MYSQL_RES *res = mysql_store_result(conn);
+            MYSQL_ROW row = (res != nullptr) ? mysql_fetch_row(res) : nullptr;
+            if (row != nullptr)
+            {
+                n_prob = cell(row[0]);
+                n_sub = cell(row[1]);
+                n_user = cell(row[2]);
+            }
+            if (res != nullptr)
+            {
+                mysql_free_result(res);
+            }
+        }
+
+        size_t pos;
+        while ((pos = home.find("{{problems}}")) != string::npos)
+        {
+            home.replace(pos, 12, n_prob);
+        }
+        while ((pos = home.find("{{submissions}}")) != string::npos)
+        {
+            home.replace(pos, 15, n_sub);
+        }
+        while ((pos = home.find("{{users}}")) != string::npos)
+        {
+            home.replace(pos, 9, n_user);
+        }
+
         send_response(conn_fd, 200, home, "text/html; charset=utf-8");
     }
     // 回显页
@@ -2588,15 +2720,20 @@ void handle_request(int conn_fd, const string &req)
         {
             stringstream page;
             page << page_head("注册")
-                 << "<div class=\"form\">\n"
-                 << "<form method=\"POST\" action=\"/register\">\n"
-                 << "<p>用户名：<input name=\"username\" maxlength=\"32\"></p>\n"
-                 << "<p>密码：<input name=\"password\" type=\"password\"></p>\n"
-                 << "<p>再输一次：<input name=\"password2\" type=\"password\"></p>\n"
+                 << "<div class=\"auth\">\n<section class=\"auth-card\">\n"
+                 << "<h1>注册</h1>\n"
+                 << "<p class=\"lead\">创建一个账号，马上就能做题。</p>\n"
+                 << "<form class=\"form\" method=\"POST\" action=\"/register\">\n"
+                 << "<label class=\"field\"><span>用户名</span>"
+                    "<input name=\"username\" maxlength=\"32\" autocomplete=\"username\" required></label>\n"
+                 << "<label class=\"field\"><span>密码</span>"
+                    "<input name=\"password\" type=\"password\" autocomplete=\"new-password\" required></label>\n"
+                 << "<label class=\"field\"><span>再输一次</span>"
+                    "<input name=\"password2\" type=\"password\" autocomplete=\"new-password\" required></label>\n"
                  << "<button type=\"submit\">注册</button>\n"
                  << "</form>\n"
-                 << "<p class=\"note\">已经有账号了？<a href=\"/login\">去登录</a></p>\n"
-                 << "</div>\n"
+                 << "<p class=\"auth-alt\">已经有账号了？<a href=\"/login\">去登录</a></p>\n"
+                 << "</section>\n</div>\n"
                  << page_tail();
             send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
         }
@@ -2716,14 +2853,21 @@ void handle_request(int conn_fd, const string &req)
         {
             stringstream page;
             page << page_head("登录")
-                 << "<div class=\"form\">\n"
-                 << "<form method=\"POST\" action=\"/login\">\n"
-                 << "<p>用户名：<input name=\"username\"></p>\n"
-                 << "<p>密码：<input name=\"password\" type=\"password\"></p>\n"
+                 << "<div class=\"auth\">\n<section class=\"auth-card\">\n"
+                 << "<h1>登录</h1>\n"
+                 << "<p class=\"lead\">用你的账号继续做题。</p>\n"
+                 << "<form class=\"form\" method=\"POST\" action=\"/login\">\n"
+                 << "<label class=\"field\"><span>用户名</span>"
+                    "<input name=\"username\" autocomplete=\"username\" required></label>\n"
+                 << "<label class=\"field\"><span>密码</span>"
+                    "<input name=\"password\" type=\"password\" autocomplete=\"current-password\" required></label>\n"
                  << "<button type=\"submit\">登录</button>\n"
-                 << "</form>\n"
-                 << "</div>\n"
-                 << page_tail();
+                 << "</form>\n";
+            if (ALLOW_REGISTRATION)
+            {
+                page << "<p class=\"auth-alt\">还没有账号？<a href=\"/register\">注册一个</a></p>\n";
+            }
+            page << "</section>\n</div>\n" << page_tail();
             send_response(conn_fd, 200, page.str(), "text/html; charset=utf-8");
         }
     }
@@ -2829,12 +2973,17 @@ void handle_request(int conn_fd, const string &req)
 
         stringstream page;
         page << page_head("个人中心")
-             << "<h1>" << html_escape(current_user) << "</h1>\n"
-             << "<div class=\"form\">\n"
-             << "<form method=\"POST\" action=\"/profile\">\n"
-             << "<p>原密码：<input name=\"old_password\" type=\"password\"></p>\n"
-             << "<p>新密码：<input name=\"new_password\" type=\"password\"></p>\n"
-             << "<p>再输一次：<input name=\"new_password2\" type=\"password\"></p>\n"
+             << "<header class=\"page-head\"><h1>" << html_escape(current_user) << "</h1>"
+                "<p class=\"lead\">在这里修改密码。修改后，其它设备上的登录会被踢下线。</p></header>\n"
+             << "<div class=\"panel\">\n"
+             << "<h2>修改密码</h2>\n"
+             << "<form class=\"form\" method=\"POST\" action=\"/profile\">\n"
+             << "<label class=\"field\"><span>原密码</span>"
+                "<input name=\"old_password\" type=\"password\" autocomplete=\"current-password\"></label>\n"
+             << "<label class=\"field\"><span>新密码</span>"
+                "<input name=\"new_password\" type=\"password\" autocomplete=\"new-password\"></label>\n"
+             << "<label class=\"field\"><span>再输一次</span>"
+                "<input name=\"new_password2\" type=\"password\" autocomplete=\"new-password\"></label>\n"
              << "<button type=\"submit\">修改密码</button>\n"
              << "</form>\n"
              << "</div>\n"
@@ -2844,7 +2993,7 @@ void handle_request(int conn_fd, const string &req)
     // 题库列表
     else if (path == "/problems")
     {
-        send_response(conn_fd, 200, render_problems(), "text/html; charset=utf-8");
+        send_response(conn_fd, 200, render_problems(current_user), "text/html; charset=utf-8");
     }
     // 我的提交
     else if (path == "/submissions")
