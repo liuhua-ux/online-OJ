@@ -21,6 +21,10 @@ judge_demo/output.txt
 
 # 二期服务端（C++）的编译产物
 oj_server/server
+oj_server/server_test
+
+# 运行日志（日志模块 FIX-07 的输出）
+oj_server/logs/
 # 编辑器本地缓存（Visual Studio / VS Code）
 .vs/
 .vscode/

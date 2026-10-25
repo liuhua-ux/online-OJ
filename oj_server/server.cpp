@@ -1,5 +1,6 @@
 #include "auth.h"
 #include "db.h"
+#include "log.h"
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -28,6 +29,8 @@
 #include <random>
 #include <algorithm>
 #include <filesystem>
+#include <chrono>
+#include <arpa/inet.h>
 
 using namespace std;
 
@@ -44,6 +47,7 @@ struct JudgeTask
     int problem_id;
     int tl_ms;
     int ml_mb;
+    string username;
 };
 
 queue<Task> task_queue;
@@ -81,6 +85,12 @@ const map<string, string>
 // 渲染页面时要显示"谁在登录"。每个请求在同一个线程里跑完，所以 thread_local 够用。
 thread_local string nav_user;
 
+// 请求上下文（每个工作线程一份）：handle_request 填，send_response 出口记访问日志
+thread_local string req_method;
+thread_local string req_path;
+thread_local string req_user;
+thread_local chrono::steady_clock::time_point req_start;
+
 void send_response(int conn_fd, int code, const string &body, const string &content_type = "text/plain; charset=utf-8", const string &extra_headers = "")
 {
     string reason;
@@ -104,6 +114,10 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
     {
         reason = "Internal Server Error";
     }
+    else if (code == 302)
+    {
+        reason = "Found";
+    }
     else
     {
         reason = "Unknown";
@@ -120,18 +134,30 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
                   body;
 
     write(conn_fd, resp.c_str(), resp.size());
+
+    char ip[INET_ADDRSTRLEN] = "?";
+    sockaddr_in peer;
+    socklen_t peer_len = sizeof(peer);
+    if (getpeername(conn_fd, (sockaddr *)&peer, &peer_len) == 0)
+    {
+        inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+    }
+    auto elapsed = chrono::duration_cast<chrono::milliseconds>(
+                       chrono::steady_clock::now() - req_start)
+                       .count();
+    log_write(LOG_INFO, "request",
+              "method=" + (req_method.empty() ? string("?") : req_method) +
+                  " path=" + log_sanitize(req_path) +
+                  " status=" + to_string(code) +
+                  " ms=" + to_string(elapsed) +
+                  " user=" + log_sanitize(req_user) +
+                  " ip=" + ip);
 }
 
 void send_redirect(int conn_fd, const string &location, const string &extra_headers = "")
 {
-    string resp = "HTTP/1.1 302 Found\r\n"
-                  "Location: " +
-                  location + "\r\n" +
-                  extra_headers +
-                  "Content-Length: 0\r\n"
-                  "Connection: close\r\n"
-                  "\r\n";
-    write(conn_fd, resp.c_str(), resp.size());
+    send_response(conn_fd, 302, "", "text/plain; charset=utf-8",
+                  "Location: " + location + "\r\n" + extra_headers);
 }
 
 string make_job_id()
@@ -435,14 +461,14 @@ bool run_judge(const string &src_path, const string &data_dir, int tl_ms, int ml
     int fd[2];
     if (pipe(fd) == -1)
     {
-        cerr << "pipe failed: " << strerror(errno) << endl;
+        log_write(LOG_ERROR, "judge_spawn", "stage=pipe err=" + string(strerror(errno)));
         return false;
     }
 
     pid_t pid = fork();
     if (pid == -1)
     {
-        cerr << "fork failed: " << strerror(errno) << endl;
+        log_write(LOG_ERROR, "judge_spawn", "stage=fork err=" + string(strerror(errno)));
         close(fd[0]);
         close(fd[1]);
         return false;
@@ -483,7 +509,7 @@ bool run_judge(const string &src_path, const string &data_dir, int tl_ms, int ml
     int status;
     if (waitpid(pid, &status, 0) == -1)
     {
-        cerr << "waitpid failed: " << strerror(errno) << endl;
+        log_write(LOG_ERROR, "judge_spawn", "stage=waitpid err=" + string(strerror(errno)));
         return false;
     }
 
@@ -562,7 +588,8 @@ string render_problems()
     if (mysql_query(conn, "SELECT problem_id, title, time_limit_ms, memory_limit_mb "
                           "FROM problems WHERE is_deleted = 0 AND is_published = 1") != 0)
     {
-        cerr << "query failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return page_head("题库") + "<p class=\"empty\">题库暂时读不出来。</p>\n" + page_tail();
     }
 
@@ -640,7 +667,8 @@ bool render_problem(int problem_id, const string &viewer, string &html)
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "query failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return false;
     }
 
@@ -815,7 +843,8 @@ string render_submissions(const string &viewer, const string &filter_user)
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "submissions query failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return page_head("我的提交") +
                "<p class=\"empty\">提交记录暂时读不出来。</p>\n" + page_tail();
     }
@@ -909,7 +938,8 @@ redisContext *redis_connect()
     {
         if (c != nullptr)
         {
-            cerr << "redis connect failed: " << c->errstr << endl;
+            log_write(LOG_ERROR, "redis",
+                      string("fn=") + __func__ + " err=" + string(c->errstr));
             redisFree(c);
         }
         return nullptr;
@@ -942,7 +972,8 @@ bool rank_query_db(vector<pair<string, int>> &rows)
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "rank query failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return false;
     }
 
@@ -1116,7 +1147,8 @@ bool render_result(const string &job_id, string &html)
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "query failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return false;
     }
 
@@ -1229,7 +1261,8 @@ bool get_problem_limits(int problem_id, int &tl_ms, int &ml_mb)
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "query failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return false;
     }
 
@@ -1261,13 +1294,21 @@ void worker()
     Task t;
     while (true)
     {
+        auto wait_start = chrono::steady_clock::now();
+        size_t qlen = 0;
         {
             unique_lock<mutex> lock(mtx);
             cv.wait(lock, []
                     { return !task_queue.empty(); });
             t = task_queue.front();
             task_queue.pop();
+            qlen = task_queue.size();
         }
+        auto wait_ms = chrono::duration_cast<chrono::milliseconds>(
+                           chrono::steady_clock::now() - wait_start)
+                           .count();
+        log_write(LOG_DEBUG, "queue",
+                  "len=" + to_string(qlen) + " wait_ms=" + to_string(wait_ms));
         handle_request(t.conn_fd, t.req);
         close(t.conn_fd);
     }
@@ -1286,7 +1327,8 @@ bool set_status(const string &job_id, const string &status)
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "set_status failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return false;
     }
     return true;
@@ -1328,7 +1370,8 @@ bool finish_job(const string &job_id, const string &result_text,
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "finish_job failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return false;
     }
 
@@ -1353,7 +1396,8 @@ int count_testcases(int problem_id)
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "count_testcases failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return 0;
     }
 
@@ -1398,7 +1442,8 @@ bool get_problem_for_admin(int problem_id, ProblemRow &p)
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "get_problem_for_admin failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return false;
     }
 
@@ -1445,7 +1490,8 @@ vector<pair<string, string>> load_testcases(int problem_id)
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "load_testcases failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return cases;
     }
 
@@ -1487,7 +1533,8 @@ bool save_testcases_to_disk(int problem_id,
     std::filesystem::create_directories(dir, ec);
     if (ec)
     {
-        cerr << "mkdir testdata failed: " << ec.message() << endl;
+        log_write(LOG_ERROR, "fs",
+                  "fn=" + string(__func__) + " err=" + ec.message());
         return false;
     }
 
@@ -1544,7 +1591,8 @@ bool replace_testcases(int problem_id, const vector<TestcaseMeta> &meta)
     string del = "DELETE FROM testcases WHERE problem_id = " + to_string(problem_id);
     if (mysql_query(conn, del.c_str()) != 0)
     {
-        cerr << "delete testcases failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         mysql_query(conn, "ROLLBACK");
         return false;
     }
@@ -1562,7 +1610,8 @@ bool replace_testcases(int problem_id, const vector<TestcaseMeta> &meta)
 
         if (mysql_query(conn, sql.c_str()) != 0)
         {
-            cerr << "insert testcase failed: " << mysql_error(conn) << endl;
+            log_write(LOG_ERROR, "db",
+                      "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
             mysql_query(conn, "ROLLBACK");
             return false;
         }
@@ -1593,7 +1642,8 @@ bool update_problem(int problem_id, const map<string, string> &v, int tl_ms, int
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
-        cerr << "update_problem failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return false;
     }
     return true;
@@ -1621,7 +1671,8 @@ vector<UserRow> list_users()
     if (mysql_query(conn, "SELECT user_id, username, is_admin, is_disabled, created_at "
                           "FROM users ORDER BY user_id") != 0)
     {
-        cerr << "list_users failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return rows;
     }
 
@@ -1932,7 +1983,8 @@ string render_admin_problems()
     if (mysql_query(conn, "SELECT problem_id, title, is_published, is_deleted "
                           "FROM problems ORDER BY problem_id") != 0)
     {
-        cerr << "admin list failed: " << mysql_error(conn) << endl;
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
         return page_head("题目管理") +
                "<p class=\"empty\">题库暂时读不出来。</p>\n" + page_tail();
     }
@@ -2088,30 +2140,53 @@ void judge_worker()
         std::filesystem::remove_all(t.work_dir, ec);
         if (ec)
         {
-            cerr << "cleanup failed: " << ec.message() << endl;
+            log_write(LOG_ERROR, "fs",
+                      "fn=" + string(__func__) + " err=" + ec.message());
         }
 
-        cout << "判题完成 job_id=" << t.job_id
-             << " started=" << started
-             << " out=" << out.size() << " 字节\n"
-             << out << endl;
+        log_write(LOG_INFO, "judge",
+                  "job=" + t.job_id +
+                      " user=" + log_sanitize(t.username) +
+                      " problem=" + to_string(t.problem_id) +
+                      " verdict=" + s.verdict +
+                      " passed=" + to_string(s.passed) + "/" + to_string(total) +
+                      " time_ms=" + to_string(s.time_ms) +
+                      " mem_kb=" + to_string(s.memory_kb) +
+                      " started=" + (started ? "1" : "0"));
 
-        cout << "解析 job_id=" << t.job_id
-             << " verdict=" << s.verdict
-             << " passed=" << s.passed
-             << " time=" << s.time_ms << "ms"
-             << " mem=" << s.memory_kb << "KB"
-             << endl;
+        if (!started)
+        {
+            log_write(LOG_ERROR, "judge_error",
+                      "job=" + t.job_id + " code=127 out=" + log_sanitize(out.substr(0, 200)));
+        }
+        else if (s.verdict == "NO_DATA")
+        {
+            log_write(LOG_WARN, "judge_error",
+                      "job=" + t.job_id + " problem=" + to_string(t.problem_id) +
+                          " reason=no_testdata");
+        }
+        else if (s.verdict.empty())
+        {
+            log_write(LOG_WARN, "judge_error",
+                      "job=" + t.job_id + " reason=unparsable out=" + log_sanitize(out.substr(0, 200)));
+        }
     }
 }
 
 void handle_request(int conn_fd, const string &req)
 {
+    req_start = chrono::steady_clock::now();
+    req_method.clear();
+    req_path.clear();
+    req_user.clear();
+
     size_t head_end = req.find("\r\n\r\n");
     istringstream iss(req);
     string method, target, version;
     string path, query;
     iss >> method >> target >> version;
+    req_method = method;
+    req_path = target;
 
     size_t qpos = target.find('?');
     if (qpos != string::npos)
@@ -2124,9 +2199,9 @@ void handle_request(int conn_fd, const string &req)
         path = target;
         query = "";
     }
-    cout << "method  = " << method << endl;
-    cout << "target  = " << target << endl;
-    cout << "version = " << version << endl;
+    log_write(LOG_DEBUG, "request_detail",
+              "method=" + method + " target=" + log_sanitize(target) +
+                  " version=" + version);
 
     string line;
     string length;
@@ -2158,12 +2233,6 @@ void handle_request(int conn_fd, const string &req)
         }
 
         headers[name] = value;
-        cout << "[" << line << "]   长度 = " << line.size() << endl;
-    }
-
-    for (const auto &kv : headers)
-    {
-        cout << kv.first << "=" << kv.second << "\n";
     }
 
     string session_id;
@@ -2171,43 +2240,31 @@ void handle_request(int conn_fd, const string &req)
     {
         session_id = cookie_value(headers["cookie"], "session");
     }
-    cout << "session  = [" << session_id << "]" << endl;
-
     string current_user;
     if (!session_id.empty())
     {
         current_user = get_session_user(session_id);
     }
-    cout << "user     = [" << current_user << "]" << endl;
 
     nav_user = current_user;
+    req_user = current_user;
 
     size_t body_need = 0;
     if (headers.count("content-length"))
     {
         length = headers["content-length"];
-        cout << " body length = " << length << "\n";
         body_need = stoi(length);
-
-        cout << " body = [" << req.substr(head_end + 4, body_need) << "]\n";
-    }
-    else
-    {
-        cout << "no body" << "\n";
     }
 
     string body = req.substr(head_end + 4, body_need);
     map<string, string> form = parse_form(body);
     map<string, string> query_params = parse_form(query);
-    for (const auto &kv : form)
-    {
-        cout << "form: " << kv.first << " = " << kv.second << "\n";
-    }
 
     size_t total_len = head_end + 4 + body_need;
     if (req.size() > total_len)
     {
-        cout << "粘包：多出 " << req.size() - total_len << " 字节，属于下一个请求（本步不处理）\n";
+        log_write(LOG_DEBUG, "request_pipelined",
+                  "extra=" + to_string(req.size() - total_len));
     }
 
     // 首页
@@ -2348,18 +2405,21 @@ void handle_request(int conn_fd, const string &req)
 
         if (mysql_query(conn, sql.c_str()) != 0)
         {
-            cerr << "insert failed: " << mysql_error(conn) << endl;
+            log_write(LOG_ERROR, "db",
+                      "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
             send_response(conn_fd, 500, "提交记录保存失败\n");
             return;
         }
 
         {
             lock_guard<mutex> lock(judge_mtx);
-            judge_queue.push({job_id, work_dir, problem_id, tl_ms, ml_mb});
+            judge_queue.push({job_id, work_dir, problem_id, tl_ms, ml_mb, current_user});
         }
         judge_cv.notify_one();
 
-        cout << "入队 job_id=" << job_id << " problem=" << problem_id << endl;
+        log_write(LOG_INFO, "submit",
+                  "job=" + job_id + " problem=" + to_string(problem_id) +
+                      " user=" + log_sanitize(current_user));
         send_redirect(conn_fd, "/result/" + job_id);
     }
     // 提交结果
@@ -2451,7 +2511,8 @@ void handle_request(int conn_fd, const string &req)
                 }
                 else
                 {
-                    cerr << "register failed: " << mysql_error(conn) << endl;
+                    log_write(LOG_ERROR, "db",
+                              "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
                     send_response(conn_fd, 500, "注册失败，请重试\n");
                 }
                 return;
@@ -2507,7 +2568,8 @@ void handle_request(int conn_fd, const string &req)
 
             if (mysql_query(conn, sql.c_str()) != 0)
             {
-                cerr << "login query failed: " << mysql_error(conn) << endl;
+                log_write(LOG_ERROR, "db",
+                          "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
                 send_response(conn_fd, 500, "数据库暂时不可用\n");
                 return;
             }
@@ -2660,7 +2722,8 @@ void handle_request(int conn_fd, const string &req)
                         escape_sql(current_user) + "'";
             if (mysql_query(conn, up.c_str()) != 0)
             {
-                cerr << "change password failed: " << mysql_error(conn) << endl;
+                log_write(LOG_ERROR, "db",
+                          "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
                 send_response(conn_fd, 500, "修改失败，请重试\n");
                 return;
             }
@@ -2807,13 +2870,15 @@ void handle_request(int conn_fd, const string &req)
 
                 if (mysql_query(conn, sql.c_str()) != 0)
                 {
-                    cerr << "create problem failed: " << mysql_error(conn) << endl;
+                    log_write(LOG_ERROR, "db",
+                              "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
                     send_response(conn_fd, 500, "保存失败，请重试\n");
                     return;
                 }
 
                 int new_id = static_cast<int>(mysql_insert_id(conn));
-                cout << "新建题目 id=" << new_id << endl;
+                log_write(LOG_INFO, "admin_problem_new",
+                          "id=" + to_string(new_id) + " by=" + log_sanitize(current_user));
 
                 send_redirect(conn_fd, "/admin/problem/" + to_string(new_id) + "/edit");
                 return;
@@ -2933,7 +2998,8 @@ void handle_request(int conn_fd, const string &req)
                              to_string(pid);
                 if (mysql_query(conn, sql.c_str()) != 0)
                 {
-                    cerr << "soft delete failed: " << mysql_error(conn) << endl;
+                    log_write(LOG_ERROR, "db",
+                              "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
                     send_response(conn_fd, 500, "删除失败，请重试\n");
                     return;
                 }
@@ -3169,6 +3235,11 @@ void handle_request(int conn_fd, const string &req)
 
 int main()
 {
+    if (!log_init("logs/oj.log", log_level_from_env()))
+    {
+        cerr << "log_init failed，日志降级到 stderr\n";
+    }
+    log_write(LOG_INFO, "startup", "port=8080 workers=4 judges=2");
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd == -1)
     {
@@ -3197,8 +3268,6 @@ int main()
         return 1;
     }
 
-    cout << "listening on 8080.....\n"
-         << flush;
 
     fcntl(listen_fd, F_SETFL, fcntl(listen_fd, F_GETFL) | O_NONBLOCK);
 
@@ -3238,8 +3307,7 @@ int main()
                     ev.data.fd = conn_fd;
                     epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &ev);
 
-                    cout << "接到新连接 fd = " << conn_fd << "\n"
-                         << flush;
+                    log_write(LOG_DEBUG, "conn", "event=accept fd=" + to_string(conn_fd));
                 }
             }
             else
@@ -3250,7 +3318,10 @@ int main()
                 if (cnt > 0)
                 {
                     conn_bufs[fd].append(buf, cnt);
-                    cout << "fd " << fd << " 收到 " << cnt << " 字节，累积 " << conn_bufs[fd].size() << " 字节" << endl;
+                    log_write(LOG_DEBUG, "conn",
+                              "event=read fd=" + to_string(fd) +
+                                  " bytes=" + to_string(cnt) +
+                                  " buffered=" + to_string(conn_bufs[fd].size()));
 
                     size_t need = request_total_len(conn_bufs[fd]);
                     if (need != string::npos && conn_bufs[fd].size() >= need)
@@ -3267,7 +3338,7 @@ int main()
                 }
                 else if (cnt == 0)
                 {
-                    cout << "fd " << fd << " 对方关闭，清理" << endl;
+                    log_write(LOG_DEBUG, "conn", "event=close fd=" + to_string(fd));
                     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                     conn_bufs.erase(fd);
                     close(fd);

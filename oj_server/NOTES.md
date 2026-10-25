@@ -1564,6 +1564,57 @@ bool admin_guard(int conn_fd, const string &current_user)   // true = 放行
 
 **诚实边界**：压测程序与服务同机（2 核互抢，绝对吞吐偏低、横向对比有效）；回环无网络延迟；库里只有 1 道题；Flask 是开发服务器不是 gunicorn。
 
+### 37. ⭐ 统一日志（`FIX-07`，2026-10-25）
+
+**背景**：`OJ-SYS-03` 要求「记录事件类型、时间、涉及用户与提交号、结果；输出包括判题耗时、峰值内存」，
+`OJ-JDG-09` 要求「系统错误时记录日志供排查」，`OJ-JDG-08` 要求「队列长度与平均等待时间可观测」。
+此前只有零散的 `cout` / `cerr`，没有文件、没有级别。
+
+**做法**：独立模块 `log.h` / `log.cpp`，四个接口：
+
+| 接口 | 职责 |
+| --- | --- |
+| `log_init(path, min_level)` | 建目录、打开文件（追加）、设阈值；文件打不开返回 `false` |
+| `log_level_from_env()` | 读 `LOG_LEVEL`，认不出回退 `INFO` |
+| `log_write(level, event, detail)` | 一行一条：`时间.毫秒 [级别] [tid=N] event key=value...` |
+| `log_sanitize(s)` | 把 `\n` / `\r` / `\t` 转成字面量 |
+
+**五个设计点**：
+
+1. **锁保护的是共享数据，不是代码块**：拼行全用局部变量（`tv` / `tm_buf` / `msg`），互不干扰；
+   `lock_guard` 只包住 `log_file` 的写入。如果拼行用全局缓冲区，就必须连拼一起锁。
+2. **`localtime_r` 不是 `localtime`**：后者返回一块全局静态缓冲区，多线程同时调会互相覆盖。
+3. **`mkdir` 失败不处理**：`EEXIST` 也返回 `-1`。先 `stat` 再建是 TOCTOU；正确姿势是直接建、错了看错误码。
+4. **防日志注入**：用户名、URL、判题器输出直接拼进日志时，一个含 `\n` 的用户名能伪造出一整行假日志。
+   实测反证：`log_sanitize` 缺席时，`user=evil\n[ERROR] forged line` 真的多出一行裸 `[ERROR]`。
+5. **不记敏感内容**：口令、会话票号、请求体（登录表单）、用户源码一律不写。旧代码里 `cout << session` /
+   `cout << body` 全部删掉 —— **日志文件是给人看的，不是给攻击者看的**。
+
+**接入点**：`main`（startup）、`send_response`（request：方法/路径/状态码/耗时/用户/IP）、
+`worker`（queue：长度/等待毫秒）、`/submit`（submit：提交号/题号/用户）、`judge_worker`（judge：结论/通过组数/
+耗时/峰值内存/用户/题号）、`judge_worker` 错误分支（judge_error）、`run_judge`（judge_spawn）、
+20 余处 `mysql_error` / `ec.message()` / Redis 错误（`db` / `fs` / `redis`，用 `__func__` 标明出处）。
+
+**⚠️ 一个容易漏的点**：`send_redirect` 原本**自己拼响应直接 `write`**，不经过 `send_response` →
+所有 302（登录跳转、提交后跳转）都不会进访问日志。改为复用 `send_response` 后补上。
+
+**实测**：
+
+```
+[INFO]  startup port=8081 workers=4 judges=2
+[DEBUG] queue   len=0 wait_ms=939
+[INFO]  request method=GET path=/problems status=200 ms=10 user= ip=127.0.0.1
+[INFO]  request method=GET path=/problems status=200 ms=16 user=logtest ip=127.0.0.1
+[INFO]  submit  job=49e8e13e problem=1 user=logtest
+[INFO]  judge   job=49e8e13e user=logtest problem=1 verdict=AC passed=3/3 time_ms=3 mem_kb=3584 started=1
+[ERROR] judge_error job=108f7565 code=127 out=
+[WARN]  judge_error job=2154c852 problem=1 reason=no_testdata
+[INFO]  request method=GET path=/rank status=302 ms=0 user= ip=127.0.0.1
+```
+
+SE 与 NO_DATA 两个变体分别用「`JUDGE_BIN` 指向不存在的路径」「`TESTDATA_DIR` 指向空目录」造出来（照 a-3 的变体套路）。
+日志模块自身用 10 线程 × 100 行并发写验收：1000 行不丢、内容不交错、11 个不同 `tid`。
+
 ## 实测数字汇总
 
 | 项 | 数字 |
@@ -1681,7 +1732,7 @@ server(pid 2445554) 手上只有一条连接：127.0.0.1:43456   Recv-Q 0     �
   接 MySQL 那一步之前回头看一眼。
 - **`realpath` 对目录也会成功**：`www/sub` 这种目录会被放行，`ifstream` 读出空串返回 `200` 空 body。
   极端情况才需要额外判 `is_directory`。
-- **没有日志/错误处理**：所有输出都是 `cout` 调试信息，没有分级、没有落盘。
+- ~~**没有日志/错误处理**~~ —— ✅ **已解决**（决策 37，`FIX-07`）：独立日志模块 `log.h` / `log.cpp`，分级 + 落盘 + 线程安全 + 防注入。
 - **导航栏那份 HTML 复制在 5 个地方**（4 个 `www/*.html` + `server.cpp` 里的结果页）—— 改导航要改 5 处。
   静态页那 4 份是静态站的天性；**C++ 那份可以靠模板文件躲掉**（见决策 25）。
 - **`Content-Type` 表很小**：只认 html / css / js / png，其余一律 `application/octet-stream`。
@@ -1689,8 +1740,8 @@ server(pid 2445554) 手上只有一条连接：127.0.0.1:43456   Recv-Q 0     �
 - ~~**无任何并发保护**~~ —— ✅ **已审过**（决策 27）。**共享的只有 `task_queue`**（有 `mtx` + `cv` 保护）；
   `epfd` / `conn_bufs` **只有主线程碰**，工人不碰；`Task t` 是各线程**自己的栈**。
   **规矩：先问「这东西谁在碰」，只有被多方碰的才需要锁。**
-- ⚠️ **日志会交错**（决策 27 带来的）：`handle_request` 里那十几行 `cout` 现在被 4 个线程同时写，
-  输出可能串行错位。**不会崩**（标准保证 `cout` 不数据竞争），但看着乱 —— 这是单线程时代没有的现象。
+- ~~**日志会交错**（决策 27 带来的）~~ —— ✅ **已解决**（决策 37）：所有输出改走 `log_write()`，
+  由 `mutex` 串行化整行写入，不再有 4 个线程交错写 `cout` 的问题。
 - ⚠️ **`worker()` 里没有 `try/catch`**：`handle_request` 抛异常（如 `stoi`）→ `std::terminate` → **整个进程死**。
   和线程池之前**结果一样**（不是本步引入），但值得记 —— 一期 Flask 那个「没 except，工人线程静默死掉」
   是同一课的 Python 版。
