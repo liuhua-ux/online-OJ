@@ -6,6 +6,8 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <cstring>
+#include <cctype>
+#include <cstdint>
 #include <iostream>
 #include <sstream>
 #include <map>
@@ -71,6 +73,12 @@ const string RESULT_PREFIX = "/result/";
 const string RANK_CACHE_KEY = "oj:rank:v2";
 const int RANK_CACHE_TTL = 60;       // 秒
 const int REDIS_TIMEOUT_US = 200000; // 200ms：Redis 挂了也不能让页面一起卡死
+
+// 请求体 / 源码上限（FIX-25）
+const size_t MAX_BODY_BYTES = 1024 * 1024;        // 语义上限：超过回 413
+const size_t MAX_CODE_BYTES = 256 * 1024;         // 源码上限
+const size_t MAX_REQUEST_BYTES = 2 * 1024 * 1024; // 单连接接收缓冲硬上限（防内存）
+
 const string ADMIN_PREFIX = "/admin/";
 
 const map<string, string>
@@ -105,6 +113,10 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
     else if (code == 404)
     {
         reason = "Not Found";
+    }
+    else if (code == 413)
+    {
+        reason = "Payload Too Large";
     }
     else if (code == 403)
     {
@@ -423,6 +435,102 @@ string render_submit_form(int problem_id, const string &last_source)
            "</script>\n";
 }
 
+// 解析 Content-Length。返回 -1：没有这个头（或请求头还没收全）；
+// 0：解析成功，值写入 out；1：有这个头但值不合法
+int content_length_of(const string &req, size_t &out)
+{
+    size_t head_end = req.find("\r\n\r\n");
+    if (head_end == string::npos)
+    {
+        return -1;
+    }
+
+    size_t pos = req.find("\r\n");
+    if (pos == string::npos)
+    {
+        return -1;
+    }
+    pos += 2; // 跳过请求行
+
+    bool found = false;
+    size_t value = 0;
+
+    while (pos < head_end)
+    {
+        size_t line_end = req.find("\r\n", pos);
+        if (line_end == string::npos || line_end > head_end)
+        {
+            line_end = head_end;
+        }
+
+        string line = req.substr(pos, line_end - pos);
+        pos = line_end + 2;
+
+        size_t colon = line.find(':');
+        if (colon == string::npos)
+        {
+            continue;
+        }
+
+        string name = line.substr(0, colon);
+        size_t nb = name.find_first_not_of(" \t");
+        size_t ne = name.find_last_not_of(" \t");
+        if (nb == string::npos)
+        {
+            continue;
+        }
+        name = name.substr(nb, ne - nb + 1);
+
+        for (char &ch : name)
+        {
+            ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+        }
+        if (name != "content-length")
+        {
+            continue;
+        }
+
+        if (found)
+        {
+            return 1; // 同一个头出现两次：直接拒绝
+        }
+
+        string raw = line.substr(colon + 1);
+        size_t vb = raw.find_first_not_of(" \t");
+        size_t ve = raw.find_last_not_of(" \t");
+        if (vb == string::npos)
+        {
+            return 1;
+        }
+        raw = raw.substr(vb, ve - vb + 1);
+
+        if (raw.find_first_not_of("0123456789") != string::npos)
+        {
+            return 1; // 负号、字母、小数点都不认
+        }
+
+        for (char ch : raw)
+        {
+            size_t digit = static_cast<size_t>(ch - '0');
+            if (value > (SIZE_MAX - digit) / 10)
+            {
+                return 1; // 溢出
+            }
+            value = value * 10 + digit;
+        }
+
+        found = true;
+    }
+
+    if (!found)
+    {
+        return -1;
+    }
+
+    out = value;
+    return 0;
+}
+
 size_t request_total_len(const string &req)
 {
     size_t head_end = req.find("\r\n\r\n");
@@ -431,22 +539,12 @@ size_t request_total_len(const string &req)
 
     size_t total = head_end + 4;
 
-    size_t pos = req.find("Content-Length:");
-    if (pos != string::npos && pos < head_end)
+    // 值不合法时也按「没有 body」处理：请求头一到就派发，
+    // 由 handle_request 统一回 400，而不是让连接一直等下去
+    size_t body_len = 0;
+    if (content_length_of(req, body_len) == 0)
     {
-        size_t start = pos + string("Content-Length:").size();
-        size_t end = req.find("\r\n", start);
-
-        if (end != string::npos && end > start)
-        {
-            try
-            {
-                total += stoi(req.substr(start, end - start));
-            }
-            catch (const exception &)
-            {
-            }
-        }
+        total += body_len;
     }
     return total;
 }
@@ -1785,7 +1883,30 @@ bool set_user_disabled(int user_id, bool disabled)
 
     string sql = "UPDATE users SET is_disabled = " + to_string(disabled ? 1 : 0) +
                  " WHERE user_id = " + to_string(user_id);
-    return mysql_query(conn, sql.c_str()) == 0;
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
+        return false;
+    }
+
+    // 解禁不需要踢人：禁用期间登不进来，手里不可能有票
+    if (!disabled)
+    {
+        return true;
+    }
+
+    // 禁用立刻踢掉这个人的所有会话，旧 Cookie 从下一次请求起失效
+    string sql_kick = "DELETE s FROM sessions s JOIN users u "
+                      "ON s.username = u.username WHERE u.user_id = " + to_string(user_id);
+    if (mysql_query(conn, sql_kick.c_str()) != 0)
+    {
+        log_write(LOG_ERROR, "db",
+                  "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
+        return false;
+    }
+
+    return true;
 }
 
 bool set_user_admin(int user_id, bool admin)
@@ -2204,7 +2325,6 @@ void handle_request(int conn_fd, const string &req)
                   " version=" + version);
 
     string line;
-    string length;
     getline(iss, line);
     map<string, string> headers;
     while (getline(iss, line))
@@ -2250,10 +2370,21 @@ void handle_request(int conn_fd, const string &req)
     req_user = current_user;
 
     size_t body_need = 0;
-    if (headers.count("content-length"))
+    int cl_status = content_length_of(req, body_need);
+    if (cl_status == 1)
     {
-        length = headers["content-length"];
-        body_need = stoi(length);
+        send_response(conn_fd, 400, "Content-Length 不合法\n");
+        return;
+    }
+    if (cl_status == -1)
+    {
+        body_need = 0;
+    }
+
+    if (body_need > MAX_BODY_BYTES)
+    {
+        send_response(conn_fd, 413, "请求体太大\n");
+        return;
     }
 
     string body = req.substr(head_end + 4, body_need);
@@ -2364,6 +2495,14 @@ void handle_request(int conn_fd, const string &req)
         if (code.find_first_not_of(" \t\r\n") == string::npos)
         {
             send_response(conn_fd, 400, "代码不能为空\n");
+            return;
+        }
+
+        if (code.size() > MAX_CODE_BYTES)
+        {
+            send_response(conn_fd, 413,
+                          "源码超过 " + to_string(MAX_CODE_BYTES / 1024) +
+                              " KB，请精简后重试\n");
             return;
         }
 
@@ -3322,6 +3461,19 @@ int main()
                               "event=read fd=" + to_string(fd) +
                                   " bytes=" + to_string(cnt) +
                                   " buffered=" + to_string(conn_bufs[fd].size()));
+
+                    // 硬上限：攒了 2MB 还凑不出一个完整请求，直接断开。
+                    // 语义上限（1MB）走 413，这里只负责“内存有界”
+                    if (conn_bufs[fd].size() > MAX_REQUEST_BYTES)
+                    {
+                        log_write(LOG_WARN, "request_too_large",
+                                  "fd=" + to_string(fd) +
+                                      " buffered=" + to_string(conn_bufs[fd].size()));
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                        conn_bufs.erase(fd);
+                        close(fd);
+                        continue;
+                    }
 
                     size_t need = request_total_len(conn_bufs[fd]);
                     if (need != string::npos && conn_bufs[fd].size() >= need)
