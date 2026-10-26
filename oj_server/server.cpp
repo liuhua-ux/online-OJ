@@ -79,6 +79,17 @@ const size_t MAX_BODY_BYTES = 1024 * 1024;        // 语义上限：超过回 41
 const size_t MAX_CODE_BYTES = 256 * 1024;         // 源码上限
 const size_t MAX_REQUEST_BYTES = 2 * 1024 * 1024; // 单连接接收缓冲硬上限（防内存）
 
+// 判题队列上限（FIX-12，需求 OJ-JDG-08「队列有界」）：
+// 超出容量时拒绝新提交并明确提示，而不是无限堆积把内存吃光。
+const size_t JUDGE_QUEUE_MAX = 64;
+
+// 判题工作线程数。需求 OJ-JDG-08 要求「可配置」，所以读环境变量
+// OJ_JUDGE_THREADS（有效范围 1..JUDGE_THREADS_MAX），缺省 2。
+// 缺省给 2 是取舍：每个判题进程要 fork 出 g++ 和跑测试点的子进程，
+// 开多了会把机器压住（NOTES §29d）。
+const int JUDGE_THREADS_DEFAULT = 2;
+const int JUDGE_THREADS_MAX = 32;
+
 const string ADMIN_PREFIX = "/admin/";
 
 const map<string, string>
@@ -125,6 +136,10 @@ void send_response(int conn_fd, int code, const string &body, const string &cont
     else if (code == 500)
     {
         reason = "Internal Server Error";
+    }
+    else if (code == 503)
+    {
+        reason = "Service Unavailable";
     }
     else if (code == 302)
     {
@@ -2228,6 +2243,36 @@ string render_admin_users(const string &me)
     return page.str();
 }
 
+// 读环境变量 OJ_JUDGE_THREADS；非法值回落到默认值并记一条 WARN。
+int judge_thread_count()
+{
+    const char *env = getenv("OJ_JUDGE_THREADS");
+    if (env == nullptr)
+    {
+        return JUDGE_THREADS_DEFAULT;
+    }
+
+    try
+    {
+        // pos 告诉 stoi 吃到第几个字符就停了 —— 必须整串吃完才算合法，
+        // 否则 "4abc" 会被当成 4（stoi 只看前缀，静默给错值）。
+        size_t pos = 0;
+        int n = stoi(env, &pos);
+        if (pos == strlen(env) && n >= 1 && n <= JUDGE_THREADS_MAX)
+        {
+            return n;
+        }
+    }
+    catch (const exception &)
+    {
+    }
+
+    log_write(LOG_WARN, "judge",
+              "fn=judge_thread_count reason=bad_env env=" + log_sanitize(env) +
+                  " fallback=" + to_string(JUDGE_THREADS_DEFAULT));
+    return JUDGE_THREADS_DEFAULT;
+}
+
 void judge_worker()
 {
     while (true)
@@ -2550,10 +2595,60 @@ void handle_request(int conn_fd, const string &req)
             return;
         }
 
+        // 队列有界（FIX-12 / OJ-JDG-08）：满了就不收，而不是无限堆积。
+        // 容量判断和 push 在同一把锁里，避免两个工人同时看到"还剩一个位"。
+        bool queued = false;
         {
             lock_guard<mutex> lock(judge_mtx);
-            judge_queue.push({job_id, work_dir, problem_id, tl_ms, ml_mb, current_user});
+            if (judge_queue.size() < JUDGE_QUEUE_MAX)
+            {
+                judge_queue.push({job_id, work_dir, problem_id, tl_ms, ml_mb, current_user});
+                queued = true;
+            }
         }
+
+        if (!queued)
+        {
+            // 撤掉 Temporary 目录和刚落库的记录 ——
+            // 否则库里会留下永远「排队中」的孤儿，/tmp 也会堆满没人清的目录。
+            std::error_code ec;
+            std::filesystem::remove_all(work_dir, ec);
+            if (ec)
+            {
+                log_write(LOG_ERROR, "fs",
+                          "fn=" + string(__func__) + " op=remove work_dir err=" + ec.message());
+            }
+
+            string del = "DELETE FROM submissions WHERE job_id = '" +
+                         escape_sql(job_id) + "'";
+            if (mysql_query(conn, del.c_str()) != 0)
+            {
+                log_write(LOG_ERROR, "db",
+                          "fn=" + string(__func__) + " op=rollback job=" + job_id +
+                              " err=" + string(mysql_error(conn)));
+            }
+
+            log_write(LOG_WARN, "judge",
+                      "fn=" + string(__func__) + " reason=queue_full job=" + job_id +
+                          " user=" + log_sanitize(current_user) +
+                          " max=" + to_string(JUDGE_QUEUE_MAX));
+
+            // 用户是在题目页提交的，返回整页 HTML 比一行纯文本好收拾：
+            // 有导航、有返回题目页的链接，不用自己按后退。
+            string page = page_head("判题队列已满");
+            page += "<h2>判题队列已满</h2>\n";
+            page += "<p>排队上限是 " + to_string(JUDGE_QUEUE_MAX) +
+                    " 份提交，现在已满。请稍等几秒后重新提交。</p>\n";
+            page += "<p><a href=\"/problem/" + to_string(problem_id) +
+                    "\">返回题目页</a></p>\n";
+            page += page_tail();
+
+            // Retry-After 是 503 的标准搭档：告诉客户端多久之后再来
+            send_response(conn_fd, 503, page, "text/html; charset=utf-8",
+                          "Retry-After: 5\r\n");
+            return;
+        }
+
         judge_cv.notify_one();
 
         log_write(LOG_INFO, "submit",
@@ -3378,7 +3473,10 @@ int main()
     {
         cerr << "log_init failed，日志降级到 stderr\n";
     }
-    log_write(LOG_INFO, "startup", "port=8080 workers=4 judges=2");
+    int judge_n = judge_thread_count();
+    log_write(LOG_INFO, "startup",
+              "port=8080 workers=4 judges=" + to_string(judge_n) +
+                  " queue_max=" + to_string(JUDGE_QUEUE_MAX));
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd == -1)
     {
@@ -3421,7 +3519,14 @@ int main()
     map<int, string> conn_bufs;
 
     thread t1(worker), t2(worker), t3(worker), t4(worker);
-    thread j1(judge_worker), j2(judge_worker);
+
+    // 判题工人数按环境变量可配（FIX-12 / OJ-JDG-08）。
+    // vector<thread> 在 main 里一直活着；main 是死循环，不会走到析构那一步。
+    vector<thread> judge_pool;
+    for (int i = 0; i < judge_n; i++)
+    {
+        judge_pool.push_back(thread(judge_worker));
+    }
 
     while (true)
     {
