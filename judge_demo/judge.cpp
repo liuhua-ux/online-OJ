@@ -89,6 +89,14 @@ string run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
         lim.rlim_max = 1024LL * 1024 * 1024;
         setrlimit(RLIMIT_AS, &lim);
 
+        // 用户程序崩溃时不该在服务器上留 core 文件。
+        // ⚠️ 本机 core_pattern 是管道模式（|/usr/share/apport/apport），而管道模式下
+        // 内核不检查 RLIMIT_CORE —— 所以这条只在"文件模式"下有效。要让 RE 的 time_ms
+        // 不被 apport 拖成近 1200ms，服务器还得把 core_pattern 改回普通文件（见 NOTES §39）。
+        // （试过 prctl(PR_SET_DUMPABLE, 0)：execve 会把它重置成默认值，等于没设。）
+        struct rlimit core = {0, 0};
+        setrlimit(RLIMIT_CORE, &core);
+
         alarm((tl_ms+999)/1000);
 
         execlp("./test", "./test", (char *)NULL);
@@ -110,24 +118,26 @@ string run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
     cout << "peak memory: " << ru.ru_maxrss << " KB\n";
     cout << "time: " << cost_ms << " ms\n";
 
+    // 判定优先级（FIX-02）：TLE → MLE → RE。
+    // 被闹钟打断的程序没跑完，它的 ru_maxrss 只是"跑到一半时的峰值"，
+    // 不能拿这个不完整的数去判它超内存 —— 否则"又死循环又吃内存"会被报成 MLE，
+    // 用户看到的结论和他实际写错的地方对不上。
+    if (WIFSIGNALED(run_status) && WTERMSIG(run_status) == SIGALRM)
+    {
+        cout << "Time Limit Exceeded\n";
+        return "TLE";
+    }
+
     if (ru.ru_maxrss > ml_mb * 1024)
     {
         cout << "Memory Limit Exceeded (" << ru.ru_maxrss << " KB)\n";
         return "MLE"; // 父进程 ①
     }
+
     if (WIFSIGNALED(run_status))
     {
-        int sig = WTERMSIG(run_status);
-        if (sig == SIGALRM)
-        {
-            cout << "Time Limit Exceeded\n";
-            return "TLE";
-        }
-        else
-        {
-            cout << "Runtime Error (signal " << sig << ")\n";
-            return "RE";
-        } 
+        cout << "Runtime Error (signal " << WTERMSIG(run_status) << ")\n";
+        return "RE";
     }
 
     ifstream got("output.txt");
@@ -174,7 +184,7 @@ int main(int argc, char *argv[])
     {
         string in_path = string(argv[2]) + "/" + to_string(i) + ".in";
         string ans_path = string(argv[2]) + "/" + to_string(i) + ".ans";
-        fstream check(ans_path);
+        ifstream check(ans_path);   // 只读打开：容器里 testdata 是只读挂载，fstream 默认带写权限会打不开
         if (!check.is_open())
         {
             break;
