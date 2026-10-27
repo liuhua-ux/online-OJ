@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS problems (
     memory_limit_mb  INT          NOT NULL,   -- 内存限制（MB）
     is_published     TINYINT      NOT NULL DEFAULT 0,   -- 0=草稿 1=已发布
     is_deleted       TINYINT      NOT NULL DEFAULT 0,   -- 软删除
+    version          INT          NOT NULL DEFAULT 1,   -- 乐观锁版本号（FIX-21）
     created_at       DATETIME     NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -56,7 +57,7 @@ CREATE TABLE IF NOT EXISTS submissions (
     problem_id  INT          NULL,   -- NULL 只表示「这一列引入之前的老数据」
     status      VARCHAR(16)  NOT NULL,
     result      MEDIUMTEXT   NULL,   -- 判题器原始输出（出怪问题时唯一的现场）
-    created_at  DATETIME     NOT NULL,
+    created_at  DATETIME(6)  NOT NULL,   -- 微秒精度：同一秒内的多条也能稳定排序（FIX-16）
     -- ⚠️ FIX-06 这几列在实际库里排在 created_at **之后** ——
     -- 因为 ALTER TABLE ADD COLUMN 默认往**最后**加，不认你心里想的顺序。
     -- 这里跟实际库保持一致，免得「新库」和「老库」列顺序不同。

@@ -29,6 +29,12 @@ std::string create_session(const std::string &username);
 // 票号 → 用户名；无效或过期返回空串
 std::string get_session_user(const std::string &session_id);
 
+// 票号 → CSRF 令牌；无效或过期返回空串（FIX-19）
+std::string get_session_csrf(const std::string &session_id);
+
+// 常数时间比对提交的令牌与这张票的令牌；任一为空或不等都返回 false
+bool csrf_verify(const std::string &session_id, const std::string &token);
+
 // 注销，把票从库里删掉
 bool destroy_session(const std::string &session_id);
 

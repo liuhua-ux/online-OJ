@@ -137,10 +137,12 @@ string create_session(const string &username)
     }
 
     string id = make_session_id();
-    string sql = "INSERT INTO sessions (session_id, username, created_at, expires_at) "
+    // 令牌和票号同源、同一刻签发：一次登录两样东西，令牌只出现在页面里
+    string csrf = make_session_id();
+    string sql = "INSERT INTO sessions (session_id, username, csrf_token, created_at, expires_at) "
                  "VALUES ('" +
-                 id + "', '" + escape_sql(username) + "', NOW(), "
-                                                      "NOW() + INTERVAL " +
+                 id + "', '" + escape_sql(username) + "', '" + csrf + "', NOW(), "
+                                                                         "NOW() + INTERVAL " +
                  to_string(SESSION_TTL_SECONDS) + " SECOND)";
 
     if (mysql_query(conn, sql.c_str()) != 0)
@@ -185,6 +187,74 @@ string get_session_user(const string &session_id)
 
     mysql_free_result(res);
     return user;
+}
+
+string get_session_csrf(const string &session_id)
+{
+    MYSQL *conn = get_conn();
+    if (conn == nullptr)
+    {
+        return "";
+    }
+
+    string sql = "SELECT csrf_token FROM sessions "
+                 "WHERE session_id = '" +
+                 escape_sql(session_id) + "' "
+                                          "AND expires_at > NOW()";
+
+    if (mysql_query(conn, sql.c_str()) != 0)
+    {
+        cerr << "get_session_csrf failed: " << mysql_error(conn) << endl;
+        return "";
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == nullptr)
+    {
+        return "";
+    }
+
+    string token;
+    MYSQL_ROW row = mysql_fetch_row(res);
+    if (row != nullptr && row[0] != nullptr)
+    {
+        token = row[0];
+    }
+
+    mysql_free_result(res);
+
+    // 自愈：迁移前签发的旧票没有令牌（空串）。当场补一个并写回去，
+    // 否则这张票的管理页表单全是空令牌、怎么刷新都 403。
+    if (token.empty())
+    {
+        token = make_session_id();
+        string fix = "UPDATE sessions SET csrf_token = '" + token +
+                     "' WHERE session_id = '" + escape_sql(session_id) + "'";
+        if (mysql_query(conn, fix.c_str()) != 0)
+        {
+            cerr << "backfill csrf failed: " << mysql_error(conn) << endl;
+            return "";
+        }
+    }
+
+    return token;
+}
+
+bool csrf_verify(const string &session_id, const string &token)
+{
+    if (session_id.empty() || token.empty())
+    {
+        return false;
+    }
+
+    string expected = get_session_csrf(session_id);
+    if (expected.empty() || expected.size() != token.size())
+    {
+        return false;
+    }
+
+    // 常数时间比对：不让攻击者靠响应时间一位一位地试出令牌
+    return CRYPTO_memcmp(expected.data(), token.data(), expected.size()) == 0;
 }
 
 bool destroy_session(const string &session_id)

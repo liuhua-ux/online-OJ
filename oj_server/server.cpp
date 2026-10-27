@@ -20,6 +20,7 @@
 #include <cerrno>
 #include <stdexcept>
 #include <mutex>
+#include <atomic>
 #include <thread>
 #include <condition_variable>
 #include <queue>
@@ -70,7 +71,7 @@ const string RESULT_PREFIX = "/result/";
 // ⚠️ 一期 Flask 也在用 Redis，它的键是 "oj:rank"、存的是 JSON。
 // 同一台 Redis 是共享命名空间：键一样但格式不同 → 双方解析都失败、互相覆盖，缓存白做。
 // 二期用独立的键，两期可以并存对照。
-const string RANK_CACHE_KEY = "oj:rank:v2";
+const string RANK_CACHE_KEY = "oj:rank:v3"; // v3：改成长度前缀格式（FIX-23）
 const int RANK_CACHE_TTL = 60;       // 秒
 const int REDIS_TIMEOUT_US = 200000; // 200ms：Redis 挂了也不能让页面一起卡死
 
@@ -948,7 +949,9 @@ string render_submissions(const string &viewer, const string &filter_user)
         where = " WHERE s.username = '" + escape_sql(filter_user) + "'";
     }
 
-    string sql = "SELECT s.job_id, s.username, s.problem_id, p.title, s.status, s.created_at "
+    // 排序用完整精度，显示只到秒 —— 微秒只是用来定序的，人不用看
+    string sql = "SELECT s.job_id, s.username, s.problem_id, p.title, s.status, "
+                 "DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') "
                  "FROM submissions s LEFT JOIN problems p "
                  "ON s.problem_id = p.problem_id" +
                  where +
@@ -1106,6 +1109,79 @@ bool rank_query_db(vector<pair<string, int>> &rows)
     return true;
 }
 
+// 缓存格式（v3）：<用户名字节数>:<用户名>:<题数>\n
+// 为什么不用 TAB 分隔：注册只限制了用户名长度、没限制字符，
+// 用户名里出现 TAB 或换行就会把整份缓存撑错位（FIX-23）。
+// 长度前缀不依赖「猜哪个字符是分隔符」—— 长度是事实，不是约定。
+string rank_cache_encode(const vector<pair<string, int>> &rows)
+{
+    string text;
+    for (const auto &row : rows)
+    {
+        text += to_string(row.first.size()) + ":" + row.first + ":" +
+                to_string(row.second) + "\n";
+    }
+    return text;
+}
+
+bool rank_cache_decode(const string &text, vector<pair<string, int>> &rows)
+{
+    size_t pos = 0;
+    while (pos < text.size())
+    {
+        // 1) 用户名字节数
+        size_t colon = text.find(':', pos);
+        if (colon == string::npos || colon == pos)
+        {
+            return false;
+        }
+
+        int name_len = 0;
+        try
+        {
+            name_len = stoi(text.substr(pos, colon - pos));
+        }
+        catch (const exception &)
+        {
+            return false;
+        }
+        if (name_len < 0)
+        {
+            return false;
+        }
+
+        // 2) 精确取 name_len 个字节 —— 用户名里有冒号、换行都无所谓
+        size_t name_begin = colon + 1;
+        size_t name_end = name_begin + static_cast<size_t>(name_len);
+        if (name_end >= text.size() || text[name_end] != ':')
+        {
+            return false;
+        }
+        string name = text.substr(name_begin, name_len);
+
+        // 3) 题数，到行尾为止
+        size_t nl = text.find('\n', name_end + 1);
+        if (nl == string::npos)
+        {
+            return false;
+        }
+
+        int count = 0;
+        try
+        {
+            count = stoi(text.substr(name_end + 1, nl - name_end - 1));
+        }
+        catch (const exception &)
+        {
+            return false;
+        }
+
+        rows.push_back({name, count});
+        pos = nl + 1;
+    }
+    return true;
+}
+
 // 读缓存：true = 命中。Redis 任何问题都当"没有缓存"，绝不抛给页面
 bool rank_cache_get(vector<pair<string, int>> &rows)
 {
@@ -1122,30 +1198,11 @@ bool rank_cache_get(vector<pair<string, int>> &rows)
     // 空串也是 STRING —— "缓存了一个空榜"和"没缓存"必须分得开
     if (r != nullptr && r->type == REDIS_REPLY_STRING)
     {
-        hit = true;
-        istringstream iss(string(r->str, r->len));
-        string line;
-        while (getline(iss, line))
+        vector<pair<string, int>> parsed;
+        if (rank_cache_decode(string(r->str, r->len), parsed))
         {
-            size_t tab = line.find('\t');
-            if (tab == string::npos)
-            {
-                hit = false;
-                break;
-            }
-            try
-            {
-                rows.push_back({line.substr(0, tab), stoi(line.substr(tab + 1))});
-            }
-            catch (const exception &)
-            {
-                hit = false;
-                break;
-            }
-        }
-        if (!hit)
-        {
-            rows.clear();
+            rows = parsed;
+            hit = true;
         }
     }
 
@@ -1160,11 +1217,7 @@ bool rank_cache_get(vector<pair<string, int>> &rows)
 // 写缓存：失败无所谓，页面已经能出数据了
 void rank_cache_set(const vector<pair<string, int>> &rows)
 {
-    string text;
-    for (const auto &row : rows)
-    {
-        text += row.first + "\t" + to_string(row.second) + "\n";
-    }
+    string text = rank_cache_encode(rows);
 
     redisContext *c = redis_connect();
     if (c == nullptr)
@@ -1254,7 +1307,8 @@ bool render_result(const string &job_id, string &html)
     }
 
     string sql = "SELECT status, verdict, passed, total, time_ms, "
-                 "memory_kb, result, problem_id, created_at, source "
+                 "memory_kb, result, problem_id, "
+                 "DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s'), source "
                  "FROM submissions WHERE job_id = '" +
                  job_id + "'";
 
@@ -1537,6 +1591,7 @@ struct ProblemRow
     int memory_limit_mb = 0;
     bool is_published = false;
     bool is_deleted = false;
+    int version = 1; // 乐观锁：编辑页读到几，保存时必须还是几（FIX-21）
 };
 
 // 管理页专用：软删除的也查得到（学生侧那个查询会把已删除当不存在）
@@ -1550,7 +1605,7 @@ bool get_problem_for_admin(int problem_id, ProblemRow &p)
 
     string sql = "SELECT title, description, input_format, output_format, "
                  "sample_input, sample_output, time_limit_ms, memory_limit_mb, "
-                 "is_published, is_deleted FROM problems WHERE problem_id = " +
+                 "is_published, is_deleted, version FROM problems WHERE problem_id = " +
                  to_string(problem_id);
 
     if (mysql_query(conn, sql.c_str()) != 0)
@@ -1580,6 +1635,7 @@ bool get_problem_for_admin(int problem_id, ProblemRow &p)
         p.memory_limit_mb = row[7] ? stoi(row[7]) : 0;
         p.is_published = (row[8] != nullptr && string(row[8]) == "1");
         p.is_deleted = (row[9] != nullptr && string(row[9]) == "1");
+        p.version = row[10] ? stoi(row[10]) : 1;
     }
 
     mysql_free_result(res);
@@ -1633,17 +1689,25 @@ struct TestcaseMeta
     int ans_size = 0;
 };
 
-// 按顺序从 1 重新编号写盘。**先清空整个目录**：
-// 只覆盖前 N 个的话，旧的 3.in 还躺着，判题器会把它当「还有下一组」接着判
+// 按顺序从 1 重新编号写盘。**不能先删目录再写**：
+// 中途失败（磁盘满、进程被杀）会让这道题**一个测试点都不剩**，已发布的题变成「交上来一律不通过」（FIX-20）。
+// 修法：先写临时目录，写完整了再 rename 整体换过去 —— 同一文件系统内 rename 是原子的，
+// 判题器要么看到旧的整套，要么看到新的整套，看不到「写了一半」。
 bool save_testcases_to_disk(int problem_id,
                             const vector<pair<string, string>> &cases,
                             vector<TestcaseMeta> &meta)
 {
+    // 同一个进程里两个管理员可能同时保存 → 临时目录名要带序号
+    static atomic<unsigned long> seq{0};
+
     string dir = TESTDATA_DIR + "/" + to_string(problem_id);
+    string tag = to_string(problem_id) + "-" + to_string(getpid()) + "-" +
+                 to_string(seq.fetch_add(1));
+    string tmp = TESTDATA_DIR + "/.tmp-" + tag;
+    string old = TESTDATA_DIR + "/.old-" + tag;
     std::error_code ec;
 
-    std::filesystem::remove_all(dir, ec);
-    std::filesystem::create_directories(dir, ec);
+    std::filesystem::create_directories(tmp, ec);
     if (ec)
     {
         log_write(LOG_ERROR, "fs",
@@ -1661,17 +1725,23 @@ bool save_testcases_to_disk(int problem_id,
         string in_file = "/" + to_string(ordinal) + ".in";
         string ans_file = "/" + to_string(ordinal) + ".ans";
 
-        ofstream fin(dir + in_file, ios::binary);
+        ofstream fin(tmp + in_file, ios::binary);
         fin << in_text;
         if (fin.fail())
         {
+            log_write(LOG_ERROR, "fs", "fn=" + string(__func__) + " failed=in ordinal=" + to_string(ordinal));
+            fin.close();
+            std::filesystem::remove_all(tmp, ec);
             return false;
         }
 
-        ofstream fans(dir + ans_file, ios::binary);
+        ofstream fans(tmp + ans_file, ios::binary);
         fans << ans_text;
         if (fans.fail())
         {
+            log_write(LOG_ERROR, "fs", "fn=" + string(__func__) + " failed=ans ordinal=" + to_string(ordinal));
+            fans.close();
+            std::filesystem::remove_all(tmp, ec);
             return false;
         }
 
@@ -1683,6 +1753,49 @@ bool save_testcases_to_disk(int problem_id,
         m.ans_size = static_cast<int>(ans_text.size());
         meta.push_back(m);
     }
+
+    // 换过去：旧目录先挪开 → 临时目录改名 → 删旧目录
+    bool had_old = std::filesystem::exists(dir);
+    if (had_old)
+    {
+        std::filesystem::rename(dir, old, ec);
+        if (ec)
+        {
+            log_write(LOG_ERROR, "fs",
+                      "fn=" + string(__func__) + " step=stash err=" + ec.message());
+            std::filesystem::remove_all(tmp, ec);
+            return false;
+        }
+    }
+
+    std::filesystem::rename(tmp, dir, ec);
+    if (ec)
+    {
+        log_write(LOG_ERROR, "fs",
+                  "fn=" + string(__func__) + " step=swap err=" + ec.message());
+        // 换失败就把旧的放回去，别让这道题凭空消失
+        if (had_old)
+        {
+            std::error_code ec2;
+            std::filesystem::rename(old, dir, ec2);
+        }
+        std::error_code ec3;
+        std::filesystem::remove_all(tmp, ec3);
+        return false;
+    }
+
+    if (had_old)
+    {
+        // 删不掉旧目录不影响正确性，只是留垃圾 —— 记一条日志就够
+        std::error_code ec4;
+        std::filesystem::remove_all(old, ec4);
+        if (ec4)
+        {
+            log_write(LOG_WARN, "fs",
+                      "fn=" + string(__func__) + " step=cleanup err=" + ec4.message());
+        }
+    }
+
     return true;
 }
 
@@ -1733,12 +1846,23 @@ bool replace_testcases(int problem_id, const vector<TestcaseMeta> &meta)
     return mysql_query(conn, "COMMIT") == 0;
 }
 
-bool update_problem(int problem_id, const map<string, string> &v, int tl_ms, int ml_mb, bool publish)
+enum class UpdateResult
+{
+    Ok,
+    Conflict, // 版本号对不上 = 别人先保存了
+    Error
+};
+
+// 乐观锁：UPDATE 带上 version 条件，成功后版本号 +1。
+// 影响 0 行只有两种可能：题被软删了，或者版本号变了（别人先保存）——
+// 前者在调用方前面已经拦过，所以这里按「冲突」处理（FIX-21）。
+UpdateResult update_problem(int problem_id, const map<string, string> &v,
+                            int tl_ms, int ml_mb, bool publish, int expected_version)
 {
     MYSQL *conn = get_conn();
     if (conn == nullptr)
     {
-        return false;
+        return UpdateResult::Error;
     }
 
     // AND is_deleted = 0：软删除的题不许再改
@@ -1751,15 +1875,24 @@ bool update_problem(int problem_id, const map<string, string> &v, int tl_ms, int
                  "', time_limit_ms = " + to_string(tl_ms) +
                  ", memory_limit_mb = " + to_string(ml_mb) +
                  ", is_published = " + to_string(publish ? 1 : 0) +
-                 " WHERE problem_id = " + to_string(problem_id) + " AND is_deleted = 0";
+                 ", version = version + 1" +
+                 " WHERE problem_id = " + to_string(problem_id) +
+                 " AND is_deleted = 0" +
+                 " AND version = " + to_string(expected_version);
 
     if (mysql_query(conn, sql.c_str()) != 0)
     {
         log_write(LOG_ERROR, "db",
                   "fn=" + string(__func__) + " err=" + string(mysql_error(conn)));
-        return false;
+        return UpdateResult::Error;
     }
-    return true;
+
+    if (mysql_affected_rows(conn) == 0)
+    {
+        return UpdateResult::Conflict;
+    }
+
+    return UpdateResult::Ok;
 }
 
 struct UserRow
@@ -2030,8 +2163,23 @@ bool parse_positive_int(const string &s, int &out)
     return true;
 }
 
+// 保存撞车时给管理员的页面：不说「保存失败」含糊话，直接说发生了什么、下一步点哪
+string render_conflict_page(int problem_id)
+{
+    stringstream page;
+    page << page_head("保存冲突");
+    page << "<header class=\"page-head\"><h1>这道题刚被别人改过</h1>"
+            "<p class=\"lead\">你打开这个页面之后，另一个管理员先保存了一次。"
+            "为了不把他的改动悄悄盖掉，这次保存没有生效。</p></header>\n";
+    page << "<p><a href=\"/admin/problem/" << problem_id
+         << "/edit\">刷新这一页（会看到他的版本，再改一遍）</a></p>\n";
+    page << page_tail();
+    return page.str();
+}
+
 string render_problem_form(const string &heading, const string &action,
                            const map<string, string> &v, const string &error,
+                           const string &csrf,
                            const vector<pair<string, string>> *cases = nullptr,
                            int extra_rows = 0)
 {
@@ -2048,6 +2196,18 @@ string render_problem_form(const string &heading, const string &action,
     }
 
     page << "<form class=\"form\" method=\"POST\" action=\"" << action << "\">\n";
+
+    // CSRF 令牌走隐藏字段，不进 Cookie：别的网站能让你带上 Cookie，但读不到这个字段（FIX-19）
+    page << "<input type=\"hidden\" name=\"csrf_token\" value=\""
+         << html_escape(csrf) << "\">\n";
+
+    // 版本号同理：页面打开时读到的值，保存时原样交回去（FIX-21）
+    string form_version = field_value(v, "version");
+    if (!form_version.empty())
+    {
+        page << "<input type=\"hidden\" name=\"version\" value=\""
+             << html_escape(form_version) << "\">\n";
+    }
 
     page << "<p>标题<br><input name=\"title\" size=\"60\" value=\""
          << html_escape(field_value(v, "title")) << "\"></p>\n";
@@ -2184,7 +2344,7 @@ string render_admin_problems()
     return page.str();
 }
 
-string render_admin_users(const string &me)
+string render_admin_users(const string &me, const string &csrf)
 {
     vector<UserRow> rows = list_users();
 
@@ -2220,17 +2380,22 @@ string render_admin_users(const string &me)
             page << "<td>" << state << "</td>"
                  << "<td>" << html_escape(u.created_at) << "</td>";
 
+            string hidden = "<input type=\"hidden\" name=\"csrf_token\" value=\"" +
+                            html_escape(csrf) + "\">";
+
             page << "<td><form method=\"POST\" action=\"/admin/user/" << uid
-                 << "/reset_password\" style=\"display:inline\">"
-                    "<input name=\"new_password\" type=\"password\" size=\"10\" placeholder=\"新口令\">"
+                 << "/reset_password\" style=\"display:inline\">" << hidden
+                 << "<input name=\"new_password\" type=\"password\" size=\"10\" placeholder=\"新口令\">"
                     "<button type=\"submit\">重置</button></form></td>";
 
             page << "<td>"
                  << "<form method=\"POST\" action=\"/admin/user/" << uid
-                 << "/toggle_disabled\" style=\"display:inline\"><button type=\"submit\">"
+                 << "/toggle_disabled\" style=\"display:inline\">" << hidden
+                 << "<button type=\"submit\">"
                  << (u.is_disabled ? "解禁" : "禁用") << "</button></form>　"
                  << "<form method=\"POST\" action=\"/admin/user/" << uid
-                 << "/toggle_admin\" style=\"display:inline\"><button type=\"submit\">"
+                 << "/toggle_admin\" style=\"display:inline\">" << hidden
+                 << "<button type=\"submit\">"
                  << (u.is_admin ? "收回管理员" : "设为管理员") << "</button></form>"
                  << "</td>";
         }
@@ -2585,7 +2750,7 @@ void handle_request(int conn_fd, const string &req)
                      "VALUES ('" +
                      job_id + "', '" + escape_sql(current_user) + "', " +
                      to_string(problem_id) +
-                     ", '排队中', NULL, '" + escape_sql(code) + "', NOW())";
+                     ", '排队中', NULL, '" + escape_sql(code) + "', NOW(6))";
 
         if (mysql_query(conn, sql.c_str()) != 0)
         {
@@ -3027,6 +3192,18 @@ void handle_request(int conn_fd, const string &req)
             return;
         }
 
+        // CSRF（FIX-19）：管理后台所有写操作进门先验令牌。
+        // 令牌只在本页面的隐藏字段里 —— 别的网站能借你的 Cookie 发请求，但读不到页面内容。
+        string csrf = get_session_csrf(session_id);
+        if (method == "POST" && !csrf_verify(session_id, field_value(form, "csrf_token")))
+        {
+            log_write(LOG_WARN, "csrf",
+                      "path=" + log_sanitize(path) +
+                          " user=" + log_sanitize(current_user));
+            send_response(conn_fd, 403, "表单已失效，请刷新页面后重试\n");
+            return;
+        }
+
         if (path == "/admin/problems")
         {
             send_response(conn_fd, 200, render_admin_problems(),
@@ -3034,7 +3211,7 @@ void handle_request(int conn_fd, const string &req)
         }
         else if (path == "/admin/users")
         {
-            send_response(conn_fd, 200, render_admin_users(current_user),
+            send_response(conn_fd, 200, render_admin_users(current_user, csrf),
                           "text/html; charset=utf-8");
         }
         else if (path == "/admin/problem/new")
@@ -3076,7 +3253,7 @@ void handle_request(int conn_fd, const string &req)
                 {
                     // 400 也要把刚填的内容原样放回去 —— 这是表单页的基本礼貌
                     send_response(conn_fd, 400,
-                                  render_problem_form("新建题目", "/admin/problem/new", form, error),
+                                  render_problem_form("新建题目", "/admin/problem/new", form, error, csrf),
                                   "text/html; charset=utf-8");
                     return;
                 }
@@ -3119,7 +3296,7 @@ void handle_request(int conn_fd, const string &req)
             }
 
             send_response(conn_fd, 200,
-                          render_problem_form("新建题目", "/admin/problem/new", {}, ""),
+                          render_problem_form("新建题目", "/admin/problem/new", {}, "", csrf),
                           "text/html; charset=utf-8");
         }
         else
@@ -3347,7 +3524,31 @@ void handle_request(int conn_fd, const string &req)
                 if (!error.empty())
                 {
                     send_response(conn_fd, 400,
-                                  render_problem_form("编辑题目", action, values, error, &cases, 0),
+                                  render_problem_form("编辑题目", action, values, error, csrf, &cases, 0),
+                                  "text/html; charset=utf-8");
+                    return;
+                }
+
+                // FIX-21：版本号要在**动磁盘之前**比。
+                // 反过来（先落盘再发现冲突）磁盘已经被覆盖了，想回都回不去。
+                int form_version = 0;
+                if (!parse_positive_int(field_value(values, "version"), form_version))
+                {
+                    send_response(conn_fd, 400,
+                                  render_problem_form("编辑题目", action, values,
+                                                      "表单里没有版本号，请刷新页面重来", csrf, &cases, 0),
+                                  "text/html; charset=utf-8");
+                    return;
+                }
+                if (form_version != p.version)
+                {
+                    log_write(LOG_WARN, "admin",
+                              "problem=" + to_string(pid) +
+                                  " conflict=version" +
+                                  " form=" + to_string(form_version) +
+                                  " db=" + to_string(p.version) +
+                                  " by=" + log_sanitize(current_user));
+                    send_response(conn_fd, 409, render_conflict_page(pid),
                                   "text/html; charset=utf-8");
                     return;
                 }
@@ -3359,8 +3560,22 @@ void handle_request(int conn_fd, const string &req)
                     send_response(conn_fd, 500, "测试点写入磁盘失败\n");
                     return;
                 }
-                if (!update_problem(pid, values, tl, ml, publish))
+                UpdateResult ur = update_problem(pid, values, tl, ml, publish, form_version);
+                if (ur != UpdateResult::Ok)
                 {
+                    // 上面已经比过一次版本，这里还能撞上只有一种可能：
+                    // 两次比对之间另一个管理员刚好提交完（窗口是毫秒级）。
+                    // 此时磁盘里已经是新测试点、库里还是旧的 —— 如实报冲突，让他刷新重做。
+                    if (ur == UpdateResult::Conflict)
+                    {
+                        log_write(LOG_WARN, "admin",
+                                  "problem=" + to_string(pid) +
+                                      " conflict=race_after_disk" +
+                                      " by=" + log_sanitize(current_user));
+                        send_response(conn_fd, 409, render_conflict_page(pid),
+                                      "text/html; charset=utf-8");
+                        return;
+                    }
                     send_response(conn_fd, 500, "保存失败，请重试\n");
                     return;
                 }
@@ -3384,6 +3599,7 @@ void handle_request(int conn_fd, const string &req)
             values["sample_output"] = p.sample_output;
             values["time_limit_ms"] = to_string(p.time_limit_ms);
             values["memory_limit_mb"] = to_string(p.memory_limit_mb);
+            values["version"] = to_string(p.version);
             if (p.is_published)
             {
                 values["is_published"] = "1";
@@ -3402,7 +3618,7 @@ void handle_request(int conn_fd, const string &req)
 
             vector<pair<string, string>> cases = load_testcases(pid);
             send_response(conn_fd, 200,
-                          render_problem_form("编辑题目", action, values, "", &cases, extra_rows),
+                          render_problem_form("编辑题目", action, values, "", csrf, &cases, extra_rows),
                           "text/html; charset=utf-8");
         }
     }
