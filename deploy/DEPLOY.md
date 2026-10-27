@@ -38,7 +38,7 @@ sudo systemctl enable --now oj-server
 
 # 4) 验收
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/problems     # 200
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/register     # 403（注册已关闭）
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/register     # 200（自助注册开启；关掉时改 ALLOW_REGISTRATION=false）
 ```
 
 ## 对外开放（需要手动做）
