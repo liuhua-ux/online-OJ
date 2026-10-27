@@ -1873,6 +1873,112 @@ int main() { prctl(PR_SET_DUMPABLE, 0); int *p = nullptr; *p = 1; }   // 3 ms
 - 编译 `-Wall -Wextra` **零警告**；管理页 GET 正常、POST 无令牌/错令牌 **403**、正常令牌 302；用户管理三个操作同样受保护；删除接口无令牌 403 且**没有落库**。
 - 测试用临时题目 `problem_id=7`、两条假提交、测试会话、Redis 测试键、`/tmp/oj-fix-testdata` **全部清干净**；线上 8080 与 production testdata **未触碰**（测试实例跑 8090、`TESTDATA_DIR` 指到 `/tmp`）。
 
+### 41. 公开部署分支：判题进容器（2026-10-23，`feat/public-deploy`）
+
+从「回环自用」走到「别人能用」时先摸出两个事实：
+
+- **外网打不通**（`http://公网IP:8080` 超时）= 腾讯云安全组没放行，不是代码；
+- **判题子进程和服务器同一个 `ubuntu` 用户、没有网络隔离** → 任何能注册的人交一段 C++，就能在服务器上以 `ubuntu` 身份读到 `~/.ssh/id_ed25519` 和 `db_config.h`，还能联网发走。
+
+所以先给答辩版钉标签 `v1.0-course`，公开部署的改动全部放在分支 **`feat/public-deploy`**（不要求合并回 main）。
+
+#### 41a. 为什么用 Docker，而不是 setuid / chroot
+
+自建隔离要 `unshare(CLONE_NEWNET)`（要 CAP_SYS_ADMIN）、自己维护 chroot、还得防漏；容器一条命令给齐：
+
+```
+--network=none --read-only --cap-drop=ALL
+--pids-limit=128 --memory=1g --cpus=1
+-u 1000:1000 --security-opt no-new-privileges
+```
+
+**实测（容器内，5 条）**：
+
+| 尝试 | 结果 |
+| --- | --- |
+| 读 `/etc/shadow` | Permission denied |
+| 读宿主机 `~/.ssh/id_ed25519` | No such file or directory（根本没挂进去） |
+| 写 `/etc/hostname` | Read-only file system |
+| 连 `1.1.1.1:80` | Network is unreachable |
+| 写 `/work/ok.txt` | 成功 |
+
+#### 41b. 三个坑
+
+1. **glibc 不匹配**：宿主机（Ubuntu 24.04）编出来的 judge 拿到 Debian 镜像里跑，报 `GLIBC_2.38 not found` → 改成**镜像里现编**（Dockerfile 里 `COPY judge_demo/judge.cpp` + `g++`）。
+2. **`fstream` 默认是「读写」模式**：`std::fstream check(ans_path)` 在**只读挂载**上 `is_open()` 直接 false → 判题器以为没有测试点，报 `NO_DATA`。改 `ifstream` → AC。**这就是「同一个函数在读/写两种上下文的区别」的老课**。
+3. **挂载路径必须由宿主机解析**：Docker 是 **daemon** 去解析 `-v` 的路径，服务进程眼里的 `/tmp/oj_XXXXXX` 不等于 daemon 眼里的同一个目录（尤其开了 `PrivateTmp`）→ 提交目录从 `/tmp` 挪到 `/var/lib/oj/work`。
+
+#### 41c. 应用层加固（都在这个分支）
+
+- **关闭自助注册**，改成管理员在 `/admin/users` 里「新建账号」（`/admin/user/new`）；
+- **登录失败限流**：同一用户名 10 次 / 10 分钟 → 429；
+- **提交冷却**：同一用户 3 秒内第二次 → 429；
+- **体积上限**：请求体 1 MB、源码 256 KB → 413；
+- **日志**：`logs/oj.log`，一行一件事（登录失败、提交、判题结果）；
+- **systemd**：`deploy/oj-server.service`，开机自启、崩溃 3 秒重启，`SupplementaryGroups=docker` 让服务有 docker 权限。
+
+#### 41d. 实测
+
+- 端到端：提交 A+B → 容器判题 **AC 3/3**，`submissions.verdict = AC`；
+- **容器启动 ~0.45 s**；判一道 3 组测试的题 **~0.85 s**（需求 ≤ 3 s）；
+- 提交冷却：第一次 302、第二次 **429**；
+- 登录失败：第 11 次 **429**；
+- 请求体 1.1 MB → **413**；源码 300 KB → **413**；
+- 管理员建号 → 能登录；重名 400；GET 405；学生 403；
+- `systemctl restart` 后 `/problems` 200、提交正常。
+
+#### 41e. 仍未做
+
+- **HTTPS**（没有域名/备案；见 `deploy/DEPLOY.md` 的说明）；
+- `FIX-19`（CSRF）/ `FIX-20`（落盘原子性）/ `FIX-21`（丢失更新）/ `FIX-24`（禁用不踢会话）；
+- 安全组放行 8080 **必须手动在腾讯云控制台做**。
+
+### 42. 视觉重做：从「AI 生成的落地页」回到「工具」（2026-10-23）
+
+同学看完站点的原话是「AI 味道太重」。回看当时的 `style.css`，确实每一条都是生成式界面的默认值：
+hero 大标题 + 假的代码窗口 + 顶部网格渐变、所有内容切成**同样的圆角卡片 + 同样的软阴影**、
+首页三块大数字统计、悬停上浮 + `→` 箭头、Bahnschrift 显示字体 + 字距收紧。
+
+这一版把参照系换成**洛谷 / 力扣**（同学日常真在用的工具），原则只有一句：
+**靠字号、密度和边框分层，不靠卡片、阴影和动效。**
+
+#### 42a. 具体动了什么
+
+| 原来 | 现在 |
+| --- | --- |
+| hero + 假代码窗 + 网格渐变 + `rise` 入场动画 | 一行标题 + 一行说明 + 一条数字，页面直接进内容 |
+| 三块「大数字 + 小标签」统计卡 | 一行 `7 道题 · 42 次提交 · 5 位选手`（`·` 也去掉了，改成空格分栏） |
+| 题库：圆角卡片 + 悬停上浮 + 箭头 | 表头 + 行，`题号 / 题目 / 时间限制 / 内存限制 / 状态` 五列，悬停只换底色 |
+| 所有面板 14px 圆角 + `0 14px 36px` 阴影 | 1px 边框 + 4px 圆角，全站**零阴影** |
+| 84×84 判题结果色块 | 结果条：左侧 3px 色条 + `AC / WA` 等宽字 + 行内统计 |
+| 胶囊 chip 显示时间/内存 | 标题下一行 `时间限制 1000 ms` 纯文字 |
+| 16px 正文 / 34–46px 标题 | 14px 正文 / 22px 标题（表格 12.5–13px） |
+| 蓝色主按钮 + 蓝底导航 pill | 近黑主按钮；导航当前页用**下划线**，不用底色 |
+
+#### 42b. 留下的取舍
+
+- **编辑器保持深色**（`#161b22`），不跟随页面明暗 —— 页面上唯一一块深色，也是唯一的记忆点；
+  CodeMirror 的 theme 从「亮色用 default」改成**始终 `material-darker`**，和兜底 textarea 一致。
+- **暗色模式保留**，只是把蓝紫调换成中性灰（`#0d1117` / `#161b22`）。
+- 首页不再是营销页，改成**入口目录**（题库 / 排行榜 / 我的提交 / 回显 / 关于），
+  `{{problems}}` / `{{submissions}}` / `{{users}}` 三个占位符照旧由 `handle_request` 现查替换。
+- 移动端顶栏折成两行：品牌一行，导航一行**横向滚动**（9 个入口在 390px 下放不开）。
+
+#### 42c. 改到的文件
+
+- `www/style.css` 整份重写（设计令牌 → 组件，无 `--shadow`、无 `keyframes` 入场动画）；
+- `server.cpp`：`render_problems` 换表格骨架、`render_problem` / `render_result` 的 chip 改 `meta-line`、
+  结果页把「提交的源码」挪到判题输出之后、管理页标题输入框去掉 `size=60`；
+- `www/index.html` 重写；`about/echo/hello` 只改了图标和导航里的「登录 / 注册」拆成两个链接。
+
+#### 42d. 怎么验的
+
+Linux 侧才能编译，本地没有浏览器可跑真服务 —— 所以做法是：
+**把 `render_*` 吐出来的 HTML 原样抄成静态页**（`%TEMP%/oj-preview`），再打本地服务用
+Playwright（`--channel msedge`，不额外下载浏览器）截 1280 / 390 两档、亮暗两色对照。
+CSS 与真实页面共用同一份 `style.css`，所以布局问题能提前看见 —— 移动端导航挤成竖排就是这一步发现的。
+`server.cpp` 只做了 `g++ -fsyntax-only -Wall -Wextra`（在 VPS 上，带 `mysql_config --cflags`），**没做端到端**。
+
 ## 实测数字汇总
 
 | 项 | 数字 |

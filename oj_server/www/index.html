@@ -4,62 +4,56 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>自研 OJ · C++ 在线判题</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231d4ed8'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='3' fill='%231f2328'/></svg>">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header class="nav">
   <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">{ }</span>自研 OJ</a>
   <nav>
-    <a href="/">首页</a>
+    <a href="/" class="active">首页</a>
     <a href="/problems">题库</a>
     <a href="/about.html">关于</a>
     <a href="/echo">回显测试</a>
+    <a href="/login">登录</a>
+    <a href="/register">注册</a>
   </nav>
 </header>
 <main class="wrap">
-  <section class="hero">
-    <div class="hero-copy">
-      <h1>把代码交上去，<br>剩下的交给判题器。</h1>
-      <p class="lead">一个用 C++ 手写的在线判题系统。浏览器提交，服务端编译、运行、比对，给出 AC 或 WA。</p>
-      <div class="hero-actions">
-        <a class="btn" href="/problems">进入题库</a>
-        <a class="btn btn-ghost" href="/problem/1">看一道题</a>
-      </div>
-    </div>
-
-    <div class="code-window" aria-label="示例提交与判题结果">
-      <div class="code-bar"><span>submission.cpp</span><span>C++17</span></div>
-      <pre class="code-body"><code>#include &lt;iostream&gt;
-
-int main() {
-    int a, b;
-    std::cin &gt;&gt; a &gt;&gt; b;
-    std::cout &lt;&lt; a + b;
-}</code></pre>
-      <div class="verdict"><span class="verdict-ok">AC</span><span>3 / 3 测试点</span><span>12 ms</span><span>3.5 MB</span></div>
-    </div>
+  <section class="home-head">
+    <h1>自研 OJ</h1>
+    <p class="lead">用 C++ 写的在线判题系统。浏览器提交代码，服务端编译、运行、比对，给出 AC 或 WA。</p>
+    <p class="home-stats">
+      <span><b>{{problems}}</b> 道题</span>
+      <span><b>{{submissions}}</b> 次提交</span>
+      <span><b>{{users}}</b> 位选手</span>
+    </p>
   </section>
 
-  <section class="route-list" aria-label="站点入口">
-    <a class="route" href="/problems">
-      <span class="route-path">/problems</span>
-      <span class="route-title">题库</span>
-      <span class="route-desc">浏览题目，提交代码</span>
+  <nav class="index" aria-label="站点入口">
+    <a class="index-row" href="/problems">
+      <span class="index-name">题库</span>
+      <span class="index-desc">浏览全部题目，选一道开始写</span>
     </a>
-    <a class="route" href="/echo">
-      <span class="route-path">/echo</span>
-      <span class="route-title">回显测试</span>
-      <span class="route-desc">填一段字，服务器原样拼回来</span>
+    <a class="index-row" href="/rank">
+      <span class="index-name">排行榜</span>
+      <span class="index-desc">按通过题数排名，同一道题只算一次</span>
     </a>
-    <a class="route" href="/about.html">
-      <span class="route-path">/about.html</span>
-      <span class="route-title">关于</span>
-      <span class="route-desc">这个项目在做什么、用什么做的</span>
+    <a class="index-row" href="/submissions">
+      <span class="index-name">我的提交</span>
+      <span class="index-desc">自己的提交记录和判题结果</span>
     </a>
-  </section>
+    <a class="index-row" href="/echo">
+      <span class="index-name">回显测试</span>
+      <span class="index-desc">POST 表单解析与 HTML 转义演示</span>
+    </a>
+    <a class="index-row" href="/about.html">
+      <span class="index-name">关于</span>
+      <span class="index-desc">这个项目做了什么、用什么做的</span>
+    </a>
+  </nav>
 
-  <p class="note">整站由 <code>oj_server/server.cpp</code> 直接吐出 —— 没有 Flask，没有 nginx。</p>
+  <p class="note">整站由 <code>oj_server/server.cpp</code> 直接输出：socket、epoll、线程池，没有 Web 框架。</p>
 </main>
 <footer class="foot">二期 C++ 自研服务端：socket、epoll、线程池</footer>
 </body>

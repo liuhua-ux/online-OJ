@@ -47,3 +47,6 @@ hot100/
 
 # 简历（只留本地，不进 git）
 docs/简历/
+oj_server/logs/
+# 题库测试点：与数据库里的题目配套，不进 git（备份见 deploy/DEPLOY.md）
+judge_demo/testdata/

@@ -64,6 +64,46 @@ bool compile(string src)
     return false;
 }
 
+// 读 /proc/<pid>/status 里的 VmHWM（峰值 RSS，单位 kB）
+// 读不到（进程不存在 / 没有这一行 / 文件打不开）→ 返回 -1
+long read_vmhwm_kb(pid_t pid)
+{
+    string road = "/proc/" + to_string(pid) + "/status";
+    string line;
+    ifstream got(road);
+    if (!got.is_open())
+    {
+        cerr << "Cannot open: " << road << "\n";
+        return -1;
+    }
+    while (getline(got, line))
+    {
+        if (line.find("VmHWM:") != string::npos)
+        {
+            size_t pos = line.find_first_of("0123456789");
+            if (pos == string::npos)
+            {
+                return -1;
+            }
+            return stoi(line.substr(pos));
+        }
+    }
+    return -1;
+}
+
+bool is_child_exec_done(pid_t pid)
+{
+    string path = "/proc/" + to_string(pid) + "/comm";
+    ifstream f(path);
+    if (!f.is_open())
+    {
+        return false; // 进程没了/还没建好，当「没准备好」
+    }
+    string comm;
+    getline(f, comm); // "test\n" → getline 把 \n 吃掉
+    return comm == "test";
+}
+
 // 跑一组数据并判定
 // 返回结论字符串："AC" / "WA" / "TLE" / "MLE" / "RE"（具体原因函数内已打印）
 string run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
@@ -97,7 +137,7 @@ string run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
         struct rlimit core = {0, 0};
         setrlimit(RLIMIT_CORE, &core);
 
-        alarm((tl_ms+999)/1000);
+        alarm((tl_ms + 999) / 1000);
 
         execlp("./test", "./test", (char *)NULL);
         cerr << "run exec failed\n";
@@ -106,12 +146,32 @@ string run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
 
     int run_status;
     struct rusage ru;
-    struct timespec t0,t1;
-    clock_gettime(CLOCK_MONOTONIC,&t0);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    bool oom_killed = false;
 
-    wait4(run_pid, &run_status, 0, &ru);
+    while (true)
+    {
+        pid_t r = wait4(run_pid, &run_status, WNOHANG, &ru);
+        if (r == run_pid)
+            break;
+        if (r == -1)
+            break;
 
-    clock_gettime(CLOCK_MONOTONIC,&t1);
+        if (is_child_exec_done(run_pid)) // ← 2a 在这
+        {
+            long hwm = read_vmhwm_kb(run_pid);
+            if (hwm > 0 && hwm > (long)ml_mb * 1024)
+            {
+                if (kill(run_pid, SIGKILL) == 0)
+                    oom_killed = true;
+            }
+        }
+
+        usleep(5000);
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
     long cost_ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
 
     cout << "run done\n";
@@ -122,6 +182,12 @@ string run_one_test(string in_path, string ans_path, int tl_ms, int ml_mb)
     // 被闹钟打断的程序没跑完，它的 ru_maxrss 只是"跑到一半时的峰值"，
     // 不能拿这个不完整的数去判它超内存 —— 否则"又死循环又吃内存"会被报成 MLE，
     // 用户看到的结论和他实际写错的地方对不上。
+    if (oom_killed)
+    {
+        cout << "Memory Limit Exceeded (killed by monitor)\n";
+        return "MLE";
+    }
+
     if (WIFSIGNALED(run_status) && WTERMSIG(run_status) == SIGALRM)
     {
         cout << "Time Limit Exceeded\n";
@@ -171,7 +237,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    int tl_ms = (argc > 3) ? atoi(argv[3]) : 2000;   
+    int tl_ms = (argc > 3) ? atoi(argv[3]) : 2000;
     int ml_mb = (argc > 4) ? atoi(argv[4]) : 256;
 
     if (!compile(argv[1]))
@@ -184,7 +250,7 @@ int main(int argc, char *argv[])
     {
         string in_path = string(argv[2]) + "/" + to_string(i) + ".in";
         string ans_path = string(argv[2]) + "/" + to_string(i) + ".ans";
-        ifstream check(ans_path);   // 只读打开：容器里 testdata 是只读挂载，fstream 默认带写权限会打不开
+        ifstream check(ans_path); // 只读打开：容器里 testdata 是只读挂载，fstream 默认带写权限会打不开
         if (!check.is_open())
         {
             break;
@@ -192,21 +258,22 @@ int main(int argc, char *argv[])
         cout << "Test " << i << "\n";
 
         string v = run_one_test(in_path, ans_path, tl_ms, ml_mb);
-        if(v == "AC")
+        if (v == "AC")
         {
             passed++;
         }
-        else 
-        { 
-            cout << "VERDICT: " << v << "\n"; 
-            return 1; 
+        else
+        {
+            cout << "VERDICT: " << v << "\n";
+            return 1;
         }
     }
-    
-    if (passed == 0) 
-    { 
-        cout << "no test data found\n"; cout << "VERDICT: NO_DATA\n"; 
-        return 1; 
+
+    if (passed == 0)
+    {
+        cout << "no test data found\n";
+        cout << "VERDICT: NO_DATA\n";
+        return 1;
     }
     cout << "all " << passed << " test passed\n";
     cout << "VERDICT: AC\n";
